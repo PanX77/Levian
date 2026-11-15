@@ -3,7 +3,7 @@ local games = {
 	[2753915549] = "bf.lua", -- Blox Fruits Sea 1
 	[4442272183] = "bf.lua", -- Sea 2
 	[7449423635] = "bf.lua", -- Sea 3
-	[99521272836282] = "finalswarm", -- final swarm
+	[99521272836282] = "fs.lua", -- final swarm
   
 	-- [ID_GAME_BARU] = "game2.lua",
 }
