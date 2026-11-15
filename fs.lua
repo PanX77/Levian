@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v6)
+	Final Swarm - Lobby (v7)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -26,7 +26,9 @@ local HttpService = game:GetService("HttpService")
 local RS = game:GetService("ReplicatedStorage")
 
 ---------------------------------------------------------------- saved settings
-local FILE = "FinalSwarm/settings.json"
+local FOLDER = "Levian Hub"
+local FILE = FOLDER .. "/" .. game:GetService("Players").LocalPlayer.Name .. "-finalswarm.json"
+local OLD_FILE = "FinalSwarm/settings.json" -- location used by older versions
 local cfg = {
 	mode = "Solo",
 	difficulty = "Normal",
@@ -40,9 +42,12 @@ local cfg = {
 	dungeonMode = "Solo",
 }
 pcall(function()
-	if isfile and isfile(FILE) then
-		for k, v in pairs(HttpService:JSONDecode(readfile(FILE))) do
-			cfg[k] = v
+	if isfile then
+		local src = (isfile(FILE) and FILE) or (isfile(OLD_FILE) and OLD_FILE) or nil
+		if src then
+			for k, v in pairs(HttpService:JSONDecode(readfile(src))) do
+				cfg[k] = v
+			end
 		end
 	end
 end)
@@ -72,8 +77,8 @@ end
 
 local function save()
 	pcall(function()
-		if makefolder and not isfolder("FinalSwarm") then
-			makefolder("FinalSwarm")
+		if makefolder and not isfolder(FOLDER) then
+			makefolder(FOLDER)
 		end
 		writefile(FILE, HttpService:JSONEncode(cfg))
 	end)
@@ -82,7 +87,8 @@ end
 ---------------------------------------------------------------- UI library (own domain first, then GitHub)
 local function loadUI()
 	local urls = {
-		"https://levianstore.my.id/BananaUI.lua",
+		"https://levianstore.my.id/LevianUI.lua",
+		"https://levianstore.my.id/BananaUI.lua", -- old file name, fallback until LevianUI.lua is uploaded
 		"https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua",
 	}
 	for _, u in ipairs(urls) do
@@ -97,7 +103,13 @@ local function loadUI()
 end
 local UI = loadUI()
 if not UI then
-	warn("[FS] failed to load the UI library")
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title = "Final Swarm",
+			Text = "Failed to load the UI library",
+			Duration = 6,
+		})
+	end)
 	return
 end
 
@@ -182,7 +194,7 @@ local function joinOnce()
 	end
 	local r = getRemotes()
 	if not r or not r.wsEvent or not r.wsFunc or not r.qsEvent then
-		return false, "remotes not found (are you in the lobby?)"
+		return false, "Remotes not found - are you in the lobby?"
 	end
 	local size = PARTY_SIZE[cfg.mode] or 1
 	local chal = challengeList()
@@ -209,9 +221,7 @@ local function joinOnce()
 		task.wait(0.3)
 		r.qsEvent:FireServer("Created")
 	end
-	return true, ("queued: %s / %s / %s / %d challenge(s), waiting for the game to start"):format(
-		tostring(cfg.map), tostring(cfg.difficulty), tostring(cfg.mode), #chal
-	)
+	return true, ("Campaign: %s / %s / %s"):format(tostring(cfg.map), tostring(cfg.difficulty), tostring(cfg.mode))
 end
 
 local function joinRaidOnce()
@@ -221,7 +231,7 @@ local function joinRaidOnce()
 	end
 	local r = getRemotes()
 	if not r or not r.wsEvent or not r.rqEvent or not r.rqFunc then
-		return false, "raid remotes not found (are you in the lobby?)"
+		return false, "Raid remotes not found - in the lobby?"
 	end
 	local size = PARTY_SIZE[cfg.raidMode] or 1
 	r.rqEvent:FireServer("SelectRaid", id)
@@ -243,7 +253,7 @@ local function joinRaidOnce()
 		task.wait(0.3)
 		r.rqEvent:FireServer("Created")
 	end
-	return true, ("raid queued: %s / %s / %s, waiting for the game to start"):format(
+	return true, ("Raid: %s / %s / %s"):format(
 		tostring(cfg.raid), tostring(cfg.raidDifficulty), tostring(cfg.raidMode)
 	)
 end
@@ -255,7 +265,7 @@ local function joinDungeonOnce()
 	end
 	local r = getRemotes()
 	if not r or not r.dqEvent or not r.dqFunc then
-		return false, "dungeon remotes not found (are you in the lobby?)"
+		return false, "Dungeon remotes not found - in the lobby?"
 	end
 	local size = PARTY_SIZE[cfg.dungeonMode] or 1
 	local okL, limit = pcall(function()
@@ -279,7 +289,7 @@ local function joinDungeonOnce()
 	r.dqEvent:FireServer("PartySizeSelected", size)
 	task.wait(0.3)
 	r.dqEvent:FireServer("Created")
-	return true, ("dungeon queued: floor %d / %s, waiting for the game to start"):format(floor, tostring(cfg.dungeonMode))
+	return true, ("Dungeon: Floor %d / %s"):format(floor, tostring(cfg.dungeonMode))
 end
 
 -- joins whichever of Campaign / Raid / Dungeon is not "None"
@@ -295,10 +305,10 @@ local function joinSelected()
 		active[#active + 1] = joinDungeonOnce
 	end
 	if #active > 1 then
-		return false, "Only one of Campaign / Raid / Dungeon can be active. Set the others to None"
+		return false, "Only one of Campaign / Raid / Dungeon can be active. Set the others to None."
 	end
 	if #active == 0 then
-		return false, "Select a Map, a Raid or a Dungeon floor first"
+		return false, "Select a Map, a Raid or a Dungeon floor first."
 	end
 	return active[1]()
 end
@@ -326,7 +336,7 @@ local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
 -- remove the close (x) button and use an X logo, in case the library on the server is an older version
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("Nousigi Hub GUI")
+		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
 		if g then
 			for _, d in ipairs(g:GetDescendants()) do
 				if d:IsA("TextButton") and d.Text == "x" then
@@ -334,7 +344,7 @@ pcall(function()
 				end
 			end
 		end
-		local t = root:FindFirstChild("BananaUI Toggle")
+		local t = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
 		local b = t and t:FindFirstChildWhichIsA("TextButton")
 		if b then
 			b.Text = "X"
@@ -421,29 +431,38 @@ local status = S2.CreateLabel({ Title = "Status: ready" })
 local function setStatus(t)
 	status.SetText("Status: " .. t)
 end
+-- pop-up notification (replaces console output)
+local function notify(ok, msg, okTitle)
+	setStatus(msg)
+	UI.CreateNoti({ Title = ok and (okTitle or "Queue created") or "Queue failed", Desc = msg, ShowTime = 4 })
+end
 
 S2.CreateButton({ Title = "Join Now" }, function()
 	local ok, msg = joinSelected()
-	setStatus(msg)
-	warn("[FS] " .. (ok and "OK " or "FAILED ") .. msg)
+	notify(ok, msg)
 end)
 S2.CreateButton({ Title = "Leave Queue" }, function()
-	setStatus(leaveQueue() and "left the queue" or "remotes not found")
+	local left = leaveQueue()
+	notify(left, left and "Left the queue" or "Remotes not found", "Queue")
 end)
 
 local auto = false
 S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minutes after a success", Default = false }, function(v)
 	auto = v and true or false
+	UI.CreateNoti({ Title = "Auto Join", Desc = auto and "ON" or "OFF", ShowTime = 2 })
 	if auto then
 		task.spawn(function()
 			while auto do
 				local ok, msg = joinSelected()
-				setStatus(msg)
-				warn("[FS] " .. (ok and "OK " or "FAILED ") .. msg)
+				notify(ok, msg)
 				task.wait(ok and 120 or 20)
 			end
 		end)
 	end
 end)
 
-UI.CreateNoti({ Title = "Final Swarm v6", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
+local SF = PageF.CreateSection("AUTO CARD")
+SF.CreateLabel({ Title = "In development: waiting for the card UI data." })
+
+UI.CreateNoti({ Title = "Final Swarm v7", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })

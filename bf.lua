@@ -195,9 +195,19 @@ end
 
 Settings = {}
 HttpService = game:GetService("HttpService")
-FolderName = "Banana Cat Hub"
-SaveFileNameGame = "-BloxFruitBNNC.json"
+FolderName = "Levian Hub"
+SaveFileNameGame = "-bloxfruits.json"
 SaveFileName = game.Players.LocalPlayer.Name .. SaveFileNameGame
+-- migrate the settings file used by older versions ("Levian Hub/<user>-BloxFruitBNNC.json")
+pcall(function()
+	if not isfolder(FolderName) then
+		makefolder(FolderName)
+	end
+	local oldFile = "Banana Cat Hub/" .. game.Players.LocalPlayer.Name .. "-BloxFruitBNNC.json"
+	if not isfile(FolderName .. "/" .. SaveFileName) and isfile(oldFile) then
+		writefile(FolderName .. "/" .. SaveFileName, readfile(oldFile))
+	end
+end)
 function SaveSettings(b, t, A)
 	if A ~= nil then
 		Settings[b] = Settings[b] or {}
@@ -1761,13 +1771,40 @@ game:GetService("Players").LocalPlayer.Idled:connect(function()
 	wait(1)
 	vu:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
 end)
-local A =
-	loadstring(game:HttpGet("https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua"))()
+local A
+for _, u in ipairs({
+	"https://levianstore.my.id/LevianUI.lua",
+	"https://levianstore.my.id/BananaUI.lua", -- old file name, fallback until LevianUI.lua is uploaded
+	"https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua",
+}) do
+	local ok, lib = pcall(function()
+		return loadstring(game:HttpGet(u))()
+	end)
+	if ok and type(lib) == "table" and lib.CreateMain then
+		A = lib
+		break
+	end
+end
+assert(A, "UI library failed to load")
 Main = A.CreateMain({ Title = "Blox Fruit", Desc = " - Blox Fruit" })
+-- [PATCH] hapus tombol close (x) di pojok UI (di Android menutup seluruh UI termasuk logo)
+pcall(function()
+	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
+		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		if g then
+			for _, d in ipairs(g:GetDescendants()) do
+				if d:IsA("TextButton") and d.Text == "x" then
+					d:Destroy()
+				end
+			end
+			break
+		end
+	end
+end)
 -- [PATCH] logo tombol melayang: B -> X
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("BananaUI Toggle")
+		local g = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
 		local b = g and g:FindFirstChildWhichIsA("TextButton")
 		if b then
 			b.Text = "X"
@@ -3738,17 +3775,17 @@ SectionServer.CreateButton({ Title = "Copy JobId" }, function()
 end)
 local G, K = {}, {}
 if not pcall(function()
-	readfile("Banana Cat Hub/Jobid.json")
+	readfile("Levian Hub/Jobid.json")
 end) then
-	writefile("Banana Cat Hub/Jobid.json", game:GetService("HttpService"):JSONEncode(G))
+	writefile("Levian Hub/Jobid.json", game:GetService("HttpService"):JSONEncode(G))
 end
 if not pcall(function()
-	readfile("Banana Cat Hub/NotSameServers.json")
+	readfile("Levian Hub/NotSameServers.json")
 end) then
-	writefile("Banana Cat Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(G))
+	writefile("Levian Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(G))
 end
 function CheckJobIdServer()
-	local R, m, E, l = {}, next, game:GetService("HttpService"):JSONDecode(readfile("Banana Cat Hub/Jobid.json"))
+	local R, m, E, l = {}, next, game:GetService("HttpService"):JSONDecode(readfile("Levian Hub/Jobid.json"))
 	for Q, S in m, E, l do
 		table.insert(R, Q)
 	end
@@ -3760,7 +3797,7 @@ function HopServer(R)
 			for l, Q in pairs((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(E))) do
 				if l ~= game.JobId and not table.find(CheckJobIdServer(), l) then
 					game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport", l)
-					writefile("Banana Cat Hub/Jobid.json", game:GetService("HttpService"):JSONEncode(K))
+					writefile("Levian Hub/Jobid.json", game:GetService("HttpService"):JSONEncode(K))
 					getgenv().limit_type("clearAll")
 				end
 			end
@@ -3787,11 +3824,11 @@ function HopLessAll()
 	local K, R, m, E = game.PlaceId, {}, "", os.date("!*t").hour
 	if
 		not pcall(function()
-			R = game:GetService("HttpService"):JSONDecode(readfile("Banana Cat Hub/NotSameServers.json"))
+			R = game:GetService("HttpService"):JSONDecode(readfile("Levian Hub/NotSameServers.json"))
 		end)
 	then
 		table.insert(R, E)
-		writefile("Banana Cat Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(R))
+		writefile("Levian Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(R))
 	end
 	function HopServerLess()
 		local l, Q =
@@ -3822,7 +3859,7 @@ function HopLessAll()
 						m = if Q == tostring(l) then false else m
 					elseif tonumber(E) ~= tonumber(l) then
 						pcall(function()
-							delfile("Banana Cat Hub/NotSameServers.json")
+							delfile("Levian Hub/NotSameServers.json")
 							R = {}
 							table.insert(R, E)
 						end)
@@ -3833,7 +3870,7 @@ function HopLessAll()
 					table.insert(R, Q)
 					wait()
 					pcall(function()
-						writefile("Banana Cat Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(R))
+						writefile("Levian Hub/NotSameServers.json", game:GetService("HttpService"):JSONEncode(R))
 						wait()
 						game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport", Q)
 						getgenv().limit_type("clearAll")
@@ -21870,9 +21907,9 @@ a.CreateButton({ Title = "Copy Config" }, function()
 end)
 a.CreateBind({ Title = "Toggle GUI", Key = Enum.KeyCode.LeftControl }, function()
 	getgenv().UIToggled = not getgenv().UIToggled
-	if game.CoreGui:FindFirstChild("Nousigi Hub GUI") then
+	if game.CoreGui:FindFirstChild("Levian Hub GUI") or game.CoreGui:FindFirstChild("Nousigi Hub GUI") then
 		for T, T in ipairs(game.CoreGui:GetChildren()) do
-			if T.Name == "Nousigi Hub GUI" then
+			if T.Name == "Levian Hub GUI" or T.Name == "Nousigi Hub GUI" then
 				T.Enabled = getgenv().UIToggled
 			end
 		end
@@ -21953,7 +21990,7 @@ if not getgenv().BananaCatMainLoop then
 		if tick() - lastHopTick >= 500 then
 			lastHopTick = tick()
 			pcall(function()
-				writefile("Banana Cat Hub/Jobid.json", HttpService:JSONEncode({}))
+				writefile("Levian Hub/Jobid.json", HttpService:JSONEncode({}))
 			end)
 		end
 		pcall(function()
@@ -22435,10 +22472,10 @@ function GetNearestBerry(...)local __args = {...};local b = __args[1];local Z = 
 function GetNearestChest(...)local __args = {...};local b = __args[1];local Z = __args[5];return function()local Z,F=game:GetService("CollectionService"):GetTagged("_ChestTagged");local c=math.huge;local l=nil;local H=nil;for M,S in b[1],Z,F do if not S:GetAttribute("IsDisabled")and not S:FindFirstChild("Ignored")then M=b[2]:DistanceFromCharacter(S.Position);if M<c then c,l,H=M,i,S;end;end;end;return H;end;end
 
 -- TARGET-V14 FUNCTION: HopServer (source-recovery line 415)
-function HopServer()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Banana Cat Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end
+function HopServer()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Levian Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end
 
 -- TARGET-V14 FUNCTION: HopServerLess (source-recovery line 1720)
-function HopServerLess()local H,M=if c==""then(game.HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..Z.."/servers/Public?sortOrder=Asc&limit=100")))else(game.HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..Z.."/servers/Public?sortOrder=Asc&limit=100&cursor="..c))),"";local Z=H.nextPageCursor and H.nextPageCursor~="null"and H.nextPageCursor~=nil;if Z then c=H.nextPageCursor;end;local Z=0;for c,c in b[1](H.data)do local H=true;M=b[3](c.id);if b[4](c.maxPlayers)>b[4](c.playing)and b[4](c.playing)<=3 then for c,c in b[1](F)do if Z~=0 then H=if M==b[3](c)then false else H;elseif b[4](l)~=b[4](c)then b[2](function()delfile("Banana Cat Hub/NotSameServers.json");F={};table.insert(F,l);end);end;Z+=1;end;if H==true then table.insert(F,M);wait();b[2](function()writefile("Banana Cat Hub/NotSameServers.json",game:GetService("HttpService"):JSONEncode(F));wait();game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",M);getgenv().limit_type("clearAll");end);wait(4);end;end;end;end
+function HopServerLess()local H,M=if c==""then(game.HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..Z.."/servers/Public?sortOrder=Asc&limit=100")))else(game.HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/"..Z.."/servers/Public?sortOrder=Asc&limit=100&cursor="..c))),"";local Z=H.nextPageCursor and H.nextPageCursor~="null"and H.nextPageCursor~=nil;if Z then c=H.nextPageCursor;end;local Z=0;for c,c in b[1](H.data)do local H=true;M=b[3](c.id);if b[4](c.maxPlayers)>b[4](c.playing)and b[4](c.playing)<=3 then for c,c in b[1](F)do if Z~=0 then H=if M==b[3](c)then false else H;elseif b[4](l)~=b[4](c)then b[2](function()delfile("Levian Hub/NotSameServers.json");F={};table.insert(F,l);end);end;Z+=1;end;if H==true then table.insert(F,M);wait();b[2](function()writefile("Levian Hub/NotSameServers.json",game:GetService("HttpService"):JSONEncode(F));wait();game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",M);getgenv().limit_type("clearAll");end);wait(4);end;end;end;end
 
 -- TARGET-V14 FUNCTION: IsFarFromOtherPlayers (source-recovery line 1342)
 function IsFarFromOtherPlayers(V)for A,A in b[4](M)do if(A.Position-V.Position).Magnitude<=300 then return false;end;end;return true;end
@@ -22470,7 +22507,7 @@ function Speed_Boat_Auto_Drive(...)local __args = {...};local b = __args[1];loca
 function StartFarm(...)local __args = {...};local b = __args[1];local Z = __args[5];return function()local Z,F,c=Settings["Select Method Farm"];local l=Z==nil or Z==""or Z=="Level Farm";if Z=="Farm Katakuri"then F,c=b[1],"CakeQuest2";elseif Z=="Farm Bones"then F,c=b[2],"HauntedQuest2";elseif Z=="Farm Tyrant of the Skies"then F,c=b[3],"TikiQuest3";elseif Z=="Aura Farm"then local H=DetectMobAura();if not H then return;end;F={H};end;if Settings["Farm Material"]then Z=Settings["Select Material"];local H,M=Z and NameMaterials[Z],Z and NameWorldMaterials[Z];if type(H)~="table"or type(M)~="table"then return;end;if not M[game.PlaceId]then local S=M[getgenv().CheckPlaceId2]or M[getgenv().CheckPlaceId3]or M[getgenv().CheckPlaceId];if S and tick()>=(FarmRuntime.NextMaterialTravelAt or 0)then FarmRuntime.NextMaterialTravelAt=tick()+5;b[4](function()game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer(S);end);end;return;end;F,l=H,false;end;Z=GetNameDoubleQuest();local H=nil;if l then local M=GetBestNPC(b[5].Data.Level.Value);if not M then return;end;if DontQuest()then if LevelFarmController.ReconcileQuest(M)then return;end;Z=(GetNameDoubleQuest());else H=LevelFarmController.GetPendingMob(M);if not H then TakeQuestLevel();return;end;end;elseif not Settings["Farm Material"]and c and Settings["Auto Quest [Katakuri/Bone/Tyrant]"]then local M=LevelFarmController.GetQuestForGroup(c,b[5].Data.Level.Value);if M then local S,S=M.Level,M.Id;if DontQuest()then if LevelFarmController.ReconcileQuest(M)then return;end;Z=GetNameDoubleQuest();F=Z or M.Mob;else H=LevelFarmController.GetPendingMob(M);if not H then QuestBoneAndkatakuri(c,S);return;end;F=H;end;end;end;l=F or Z or H or"";if l==""then return;else if not Settings["Farm Material"]and Settings["Select Method Farm"]=="Farm Tyrant of the Skies"then c=CheckNameBoss("Tyrant of the Skies");if c then repeat task.wait();sizepart(c);if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));elseif Settings["Select Weapon"]=="Blox Fruit"then toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));else toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;UsedualFlock();ClickM1(c);until not IsMobAlive(c)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(c);b[6][7][b[6][6]]=nil;return;else F=workspace:FindFirstChild("Map",true)and(workspace.Map:FindFirstChild("TikiOutpost",true))and(workspace.Map.TikiOutpost:FindFirstChild("IslandModel",true));if F then local c,M,S,Q=F:FindFirstChild("Eye1",true),F:FindFirstChild("Eye2",true),F:FindFirstChild("Eye3",true),F:FindFirstChild("Eye4",true);if c and M and S and Q and c.Transparency==0 and M.Transparency==0 and S.Transparency==0 and Q.Transparency==0 then Z=DetectModelDestroyTyrant();if Z then if b[5]:DistanceFromCharacter(Z.WorldPivot.Position)>10 then toTarget(Z.WorldPivot);elseif CheckItemInventory("Skull Guitar")then if not NameWeapon("Gun")or NameWeapon("Gun")~="Skull Guitar"then game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer(unpack({[1]="LoadItem",[2]="Skull Guitar"}));else equiptool(NameWeapon("Gun"));getgenv().SpamGunSkullGuitar(Z.WorldPivot);end;else getgenv().AimPos=Z.WorldPivot;AutoAllSkill();end;end;return;end;end;end;end;if not Settings["Farm Material"]and not Settings["Ignore Attack Katakuri"]then if Settings["Select Method Farm"]=="Farm Katakuri"or Settings["Hop Find Katakuri"]then H=CheckNameBoss("Cake Prince");if H then repeat task.wait();sizepart(H);if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(H.HumanoidRootPart.CFrame*CFrame.new(7,20,0));else toTarget(H.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;UsedualFlock();ClickM1(H);until not IsMobAlive(H)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(H);b[6][7][b[6][6]]=nil;return;elseif Settings["Hop Find Katakuri"]and(SpecialHop("Cake Prince"))then return;end;end;end;local Z=DetectMob(l);if not Z then if b[7](l)=="table"then if#b[8][7][b[8][6]]>=#l then b[8][7][b[8][6]]={};return;end;local F=DetectNameTablePart(l);local c=DetectPartSpawnMob(F);if c then local H=c.CFrame;table.insert(b[8][7][b[8][6]],F);repeat task.wait(0.05);toTarget(H*CFrame.new(0,60,0));until not b[5].Character or not b[5].Character:FindFirstChild("HumanoidRootPart")or(H.Position-b[5].Character.HumanoidRootPart.Position).Magnitude<=100 or(DetectMob(l))or not Settings["Start Farm"]or not StackFarm;task.wait(0.25);end;else local F=DetectPartSpawnMob(l,true);if F then local c=F.CFrame;if not F:FindFirstChild("Ignored")then Instance.new("IntValue",F).Name="Ignored";end;repeat task.wait(0.05);toTarget(c*CFrame.new(0,60,0));until not b[5].Character or not b[5].Character:FindFirstChild("HumanoidRootPart")or(c.Position-b[5].Character.HumanoidRootPart.Position).Magnitude<=100 or(DetectMob(l))or not Settings["Start Farm"]or not StackFarm;task.wait(0.25);else DeleteIgnoredMobSpawn();end;end;else local F,c,l,H=0,0,0,0;repeat task.wait();if not IsMobAlive(Z)then break;end;local M=tick();if M>=F then F=M + 2;sizepart(Z);end;if M>=c then c=M + 15;BringMob(Z);end;if M>=l and(Z:FindFirstChild("HumanoidRootPart"))then l=M + 04;if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,20,0));elseif Settings["Select Weapon"]=="Blox Fruit"then toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,getgenv().YPosFruit or 20,0));else toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;end;if M>=H then H=M + 075;FarmMastery(Z);ClickM1(Z);end;until not IsMobAlive(Z)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(Z);b[6][7][b[6][6]]=nil;if getgenv().QuestTrainer and getgenv().QuestTrainer.CountKillMob then getgenv().QuestTrainer.CountKillMob=getgenv().QuestTrainer.CountKillMob+1;end;end;end;end;end
 
 -- TARGET-V14 FUNCTION: Time_Hop_Server (source-recovery line 409)
-function Time_Hop_Server(...)local __args = {...};local b = __args[1];local Z = __args[5];return function(Z)local function F()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Banana Cat Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end;local b=Z or(Settings["Time Hop Server"]or 5);require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Wait "..b.."s [Hop Server]<Color=/>"):Display();while wait(b)do require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Hop Server<Color=/>"):Display();F();end;end;end
+function Time_Hop_Server(...)local __args = {...};local b = __args[1];local Z = __args[5];return function(Z)local function F()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Levian Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end;local b=Z or(Settings["Time Hop Server"]or 5);require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Wait "..b.."s [Hop Server]<Color=/>"):Display();while wait(b)do require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Hop Server<Color=/>"):Display();F();end;end;end
 
 -- TARGET-V14 FUNCTION: _uiButton (source-recovery line 1902)
 function _uiButton(section, title, callback)
@@ -24562,7 +24599,7 @@ function GetNearestBerry_0068()local Z,F=game:GetService("CollectionService"):Ge
 
 function AutoCraftSharkAnchor_0070()if CheckItemInventory("Shark Anchor")then b[1].CreateNoti({Title="Banana Cat Hub",Desc="Done Shark Anchor",ShowTime=5});wait(5);return;end;if not CheckItemInventory("Monster Magnet")then if not CheckItemInventory("Shark Tooth Necklace")and(CheckCountItem("Mutant Tooth",1))and(CheckCountItem("Shark Tooth",5))then game:GetService("ReplicatedStorage").Modules.Net:FindFirstChild("RF/Craft"):InvokeServer(unpack({[1]="Craft",[2]="ToothNecklace",[3]=1,[4]={}}));elseif not CheckItemInventory("Terror Jaw")and(CheckCountItem("Mutant Tooth",2))and(CheckCountItem("Shark Tooth",5))and(CheckCountItem("Terror Eyes",1))and(CheckCountItem("Fool's Gold",10))then game:GetService("ReplicatedStorage").Modules.Net:FindFirstChild("RF/Craft"):InvokeServer(unpack({[1]="Craft",[2]="TerrorJaw",[3]=1,[4]={}}));elseif CheckItemInventory("Shark Tooth Necklace")and(CheckItemInventory("Terror Jaw"))and(CheckCountItem("Terror Eyes",2))and(CheckCountItem("Shark Tooth",10))and(CheckCountItem("Electric Wing",10))and(CheckCountItem("Fool's Gold",20))then game:GetService("ReplicatedStorage").Modules.Net:FindFirstChild("RF/Craft"):InvokeServer(unpack({[1]="Craft",[2]="SharkAnchor",[3]=1,[4]={}}));end;end;end
 
-function Time_Hop_Server_0078(Z)function F()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Banana Cat Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end;local b=Z or(Settings["Time Hop Server"]or 5);require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Wait "..b.."s [Hop Server]<Color=/>"):Display();while wait(b)do require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Hop Server<Color=/>"):Display();F();end;end
+function Time_Hop_Server_0078(Z)function F()for c=1,100,1 do for l,H in b[1]((game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer(c)))do if l~=game.JobId and not table.find(CheckJobIdServer(),l)then game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",l);writefile("Levian Hub/Jobid.json",game:GetService("HttpService"):JSONEncode(b[2]));getgenv().limit_type("clearAll");end;end;end;end;local b=Z or(Settings["Time Hop Server"]or 5);require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Wait "..b.."s [Hop Server]<Color=/>"):Display();while wait(b)do require(game:GetService("ReplicatedStorage").Notification).new("<Color=Red>Banana Cat Hub : Hop Server<Color=/>"):Display();F();end;end
 
 function Start_Farm_0085()local Z,F,c=Settings["Select Method Farm"];local l=Z==nil or Z==""or Z=="Level Farm";if Z=="Farm Katakuri"then F,c=b[1],"CakeQuest2";elseif Z=="Farm Bones"then F,c=b[2],"HauntedQuest2";elseif Z=="Farm Tyrant of the Skies"then F,c=b[3],"TikiQuest3";elseif Z=="Aura Farm"then local H=DetectMobAura();if not H then return;end;F={H};end;if Settings["Farm Material"]then Z=Settings["Select Material"];local H,M=Z and NameMaterials[Z],Z and NameWorldMaterials[Z];if type(H)~="table"or type(M)~="table"then return;end;if not M[game.PlaceId]then local S=M[getgenv().CheckPlaceId2]or M[getgenv().CheckPlaceId3]or M[getgenv().CheckPlaceId];if S and tick()>=(FarmRuntime.NextMaterialTravelAt or 0)then FarmRuntime.NextMaterialTravelAt=tick()+5;b[4](function()game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer(S);end);end;return;end;F,l=H,false;end;Z=GetNameDoubleQuest();local H=nil;if l then local M=GetBestNPC(b[5].Data.Level.Value);if not M then return;end;if DontQuest()then if LevelFarmController.ReconcileQuest(M)then return;end;Z=(GetNameDoubleQuest());else H=LevelFarmController.GetPendingMob(M);if not H then TakeQuestLevel();return;end;end;elseif not Settings["Farm Material"]and c and Settings["Auto Quest [Katakuri/Bone/Tyrant]"]then local M=LevelFarmController.GetQuestForGroup(c,b[5].Data.Level.Value);if M then local S,S=M.Level,M.Id;if DontQuest()then if LevelFarmController.ReconcileQuest(M)then return;end;Z=GetNameDoubleQuest();F=Z or M.Mob;else H=LevelFarmController.GetPendingMob(M);if not H then QuestBoneAndkatakuri(c,S);return;end;F=H;end;end;end;l=F or Z or H or"";if l==""then return;else if not Settings["Farm Material"]and Settings["Select Method Farm"]=="Farm Tyrant of the Skies"then c=CheckNameBoss("Tyrant of the Skies");if c then repeat task.wait();sizepart(c);if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));elseif Settings["Select Weapon"]=="Blox Fruit"then toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));else toTarget(c.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;UsedualFlock();ClickM1(c);until not IsMobAlive(c)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(c);b[6][7][b[6][6]]=nil;return;else F=workspace:FindFirstChild("Map",true)and(workspace.Map:FindFirstChild("TikiOutpost",true))and(workspace.Map.TikiOutpost:FindFirstChild("IslandModel",true));if F then local c,M,S,Q=F:FindFirstChild("Eye1",true),F:FindFirstChild("Eye2",true),F:FindFirstChild("Eye3",true),F:FindFirstChild("Eye4",true);if c and M and S and Q and c.Transparency==0 and M.Transparency==0 and S.Transparency==0 and Q.Transparency==0 then Z=DetectModelDestroyTyrant();if Z then if b[5]:DistanceFromCharacter(Z.WorldPivot.Position)>10 then toTarget(Z.WorldPivot);elseif CheckItemInventory("Skull Guitar")then if not NameWeapon("Gun")or NameWeapon("Gun")~="Skull Guitar"then game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer(unpack({[1]="LoadItem",[2]="Skull Guitar"}));else equiptool(NameWeapon("Gun"));getgenv().SpamGunSkullGuitar(Z.WorldPivot);end;else getgenv().AimPos=Z.WorldPivot;AutoAllSkill();end;end;return;end;end;end;end;if not Settings["Farm Material"]and not Settings["Ignore Attack Katakuri"]then if Settings["Select Method Farm"]=="Farm Katakuri"or Settings["Hop Find Katakuri"]then H=CheckNameBoss("Cake Prince");if H then repeat task.wait();sizepart(H);if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(H.HumanoidRootPart.CFrame*CFrame.new(7,20,0));else toTarget(H.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;UsedualFlock();ClickM1(H);until not IsMobAlive(H)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(H);b[6][7][b[6][6]]=nil;return;elseif Settings["Hop Find Katakuri"]and(SpecialHop("Cake Prince"))then return;end;end;end;local Z=DetectMob(l);if not Z then if b[7](l)=="table"then if#b[8][7][b[8][6]]>=#l then b[8][7][b[8][6]]={};return;end;local F=DetectNameTablePart(l);local c=DetectPartSpawnMob(F);if c then local H=c.CFrame;table.insert(b[8][7][b[8][6]],F);repeat task.wait(0.05);toTarget(H*CFrame.new(0,60,0));until not b[5].Character or not b[5].Character:FindFirstChild("HumanoidRootPart")or(H.Position-b[5].Character.HumanoidRootPart.Position).Magnitude<=100 or(DetectMob(l))or not Settings["Start Farm"]or not StackFarm;task.wait(0.25);end;else local F=DetectPartSpawnMob(l,true);if F then local c=F.CFrame;if not F:FindFirstChild("Ignored")then Instance.new("IntValue",F).Name="Ignored";end;repeat task.wait(0.05);toTarget(c*CFrame.new(0,60,0));until not b[5].Character or not b[5].Character:FindFirstChild("HumanoidRootPart")or(c.Position-b[5].Character.HumanoidRootPart.Position).Magnitude<=100 or(DetectMob(l))or not Settings["Start Farm"]or not StackFarm;task.wait(0.25);else DeleteIgnoredMobSpawn();end;end;else local F,c,l,H=0,0,0,0;repeat task.wait();if not IsMobAlive(Z)then break;end;local M=tick();if M>=F then F=M + 2;sizepart(Z);end;if M>=c then c=M + 15;BringMob(Z);end;if M>=l and(Z:FindFirstChild("HumanoidRootPart"))then l=M + 04;if game:GetService("Players").LocalPlayer.PlayerGui.TransformationHUD.ImageLabel.Visible and(Settings["Auto Finish Train Quest"]or Settings["Auto Finish Train Draco Quest"])then toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,20,0));elseif Settings["Select Weapon"]=="Blox Fruit"then toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,getgenv().YPosFruit or 20,0));else toTarget(Z.HumanoidRootPart.CFrame*CFrame.new(7,20,0));end;end;if M>=H then H=M + 075;FarmMastery(Z);ClickM1(Z);end;until not IsMobAlive(Z)or not Settings["Start Farm"]or not StackFarm;FarmRuntime.ReleaseFrozenMob(Z);b[6][7][b[6][6]]=nil;if getgenv().QuestTrainer and getgenv().QuestTrainer.CountKillMob then getgenv().QuestTrainer.CountKillMob=getgenv().QuestTrainer.CountKillMob+1;end;end;end;end
 
@@ -24634,7 +24671,7 @@ function Auto_Upgrade_Race_V2_V3_0482()local Z,F=DetectSeabeast(),checkboat();if
 
 function Configure_Select_Skills_0495(Z,F)local c="Select Skills "..Z;local l={};for H,H in b[1](F)do l[H]=false;end;EnsureAllTrueDefaults(c,F);Z=PrepareMultiSelectList(l,Settings[c],true);SelectSkillsSection.CreateDropdown({Title=c,List=Z,Search=true,Selected=true,Default=Settings[c]or nil},function(b,Z)SaveSettings(c,b,Z);end);end
 
-function HopServer_0516()writefile("Banana Cat Hub/NotSameServers.json",game:GetService("HttpService"):JSONEncode(F));wait();game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",M);getgenv().limit_type("clearAll");end
+function HopServer_0516()writefile("Levian Hub/NotSameServers.json",game:GetService("HttpService"):JSONEncode(F));wait();game:GetService("ReplicatedStorage").__ServerBrowser:InvokeServer("teleport",M);getgenv().limit_type("clearAll");end
 
 -- PASS36 recovered-function registry additions
 getgenv().BananaCatRecoveredFunctions = getgenv().BananaCatRecoveredFunctions or {}
