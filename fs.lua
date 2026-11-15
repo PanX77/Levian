@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v4)
+	Final Swarm - Lobby (v5)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -8,6 +8,12 @@
 	  WorldSelection.RemoteFunction Invoke("EnterQueue")  -> true
 	  QueueService.RemoteEvent      Fire("PartySizeSelected", <1-4>)
 	  QueueService.RemoteEvent      Fire("Created")
+	Raid (recorded for Colosseum / SandWorm):
+	  RaidQueueService.RemoteEvent    Fire("SelectRaid", <raid>)
+	  WorldSelection.RemoteEvent      Fire("SetDifficulty", <difficulty>)
+	  RaidQueueService.RemoteFunction Invoke("EnterQueue")  -> true
+	  RaidQueueService.RemoteEvent    Fire("PartySizeSelected", <1-4>)
+	  RaidQueueService.RemoteEvent    Fire("Created")
 	The game starts automatically after the queue is created.
 ]]
 
@@ -22,6 +28,9 @@ local cfg = {
 	map = "Volcano",
 	created = true,
 	challenges = {},
+	raid = "None",
+	raidDifficulty = "Normal",
+	raidMode = "Solo",
 }
 pcall(function()
 	if isfile and isfile(FILE) then
@@ -95,11 +104,13 @@ local function getRemotes()
 	if not root then
 		return nil
 	end
-	local ws, qs = root.WorldSelection, root.QueueService
+	local ws, qs, rq = root.WorldSelection, root.QueueService, root:FindFirstChild("RaidQueueService")
 	return {
 		wsEvent = ws:FindFirstChildOfClass("RemoteEvent"),
 		wsFunc = ws:FindFirstChildOfClass("RemoteFunction"),
 		qsEvent = qs:FindFirstChildOfClass("RemoteEvent"),
+		rqEvent = rq and rq:FindFirstChildOfClass("RemoteEvent"),
+		rqFunc = rq and rq:FindFirstChildOfClass("RemoteFunction"),
 	}
 end
 
@@ -135,7 +146,28 @@ end
 
 local PARTY_SIZE = { Solo = 1, Duo = 2, Trio = 3, Squad = 4 }
 
+-- display name -> id sent to the server
+local RAIDS = {
+	{ "Colosseum", "Colosseum" },
+	{ "Sand Worm", "SandWorm" },
+}
+local RAID_NAMES = { "None" }
+for _, r in ipairs(RAIDS) do
+	RAID_NAMES[#RAID_NAMES + 1] = r[1]
+end
+local function raidId()
+	for _, r in ipairs(RAIDS) do
+		if r[1] == cfg.raid then
+			return r[2]
+		end
+	end
+	return nil
+end
+
 local function joinOnce()
+	if cfg.map == "None" then
+		return false, "Campaign map is None"
+	end
 	local r = getRemotes()
 	if not r or not r.wsEvent or not r.wsFunc or not r.qsEvent then
 		return false, "remotes not found (are you in the lobby?)"
@@ -170,18 +202,72 @@ local function joinOnce()
 	)
 end
 
+local function joinRaidOnce()
+	local id = raidId()
+	if not id then
+		return false, "Raid is None"
+	end
+	local r = getRemotes()
+	if not r or not r.wsEvent or not r.rqEvent or not r.rqFunc then
+		return false, "raid remotes not found (are you in the lobby?)"
+	end
+	local size = PARTY_SIZE[cfg.raidMode] or 1
+	r.rqEvent:FireServer("SelectRaid", id)
+	task.wait(0.4)
+	r.wsEvent:FireServer("SetDifficulty", cfg.raidDifficulty)
+	task.wait(0.4)
+	local ok, res = pcall(function()
+		return r.rqFunc:InvokeServer("EnterQueue")
+	end)
+	if not ok then
+		return false, "EnterQueue error: " .. tostring(res)
+	end
+	if res ~= true then
+		return false, "EnterQueue rejected: " .. tostring(res)
+	end
+	task.wait(0.4)
+	r.rqEvent:FireServer("PartySizeSelected", size)
+	if cfg.created then
+		task.wait(0.3)
+		r.rqEvent:FireServer("Created")
+	end
+	return true, ("raid queued: %s / %s / %s, waiting for the game to start"):format(
+		tostring(cfg.raid), tostring(cfg.raidDifficulty), tostring(cfg.raidMode)
+	)
+end
+
+-- joins the Campaign or the Raid, depending on which one is not "None"
+local function joinSelected()
+	local camp, raid = cfg.map ~= "None", cfg.raid ~= "None"
+	if camp and raid then
+		return false, "Set either Map or Raid to None"
+	end
+	if raid then
+		return joinRaidOnce()
+	end
+	if camp then
+		return joinOnce()
+	end
+	return false, "Select a Map or a Raid first"
+end
+
 local function leaveQueue()
 	local r = getRemotes()
+	local done = false
 	if r and r.qsEvent then
 		r.qsEvent:FireServer("Exited")
-		return true
+		done = true
 	end
-	return false
+	if r and r.rqEvent then
+		r.rqEvent:FireServer("Exited")
+		done = true
+	end
+	return done
 end
 
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
--- remove the close (x) button if the library on the server is an older version
+-- remove the close (x) button and use an X logo, in case the library on the server is an older version
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
 		local g = root:FindFirstChild("Nousigi Hub GUI")
@@ -191,13 +277,17 @@ pcall(function()
 					d:Destroy()
 				end
 			end
-			break
+		end
+		local t = root:FindFirstChild("BananaUI Toggle")
+		local b = t and t:FindFirstChildWhichIsA("TextButton")
+		if b then
+			b.Text = "X"
 		end
 	end
 end)
 local Page = Main.CreatePage({ Page_Name = "Lobby", Page_Title = "Lobby" })
 
-local S1 = Page.CreateSection("Settings")
+local S1 = Page.CreateSection("CAMPAIGN")
 S1.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.mode }, function(v)
 	cfg.mode = v
 	save()
@@ -224,7 +314,7 @@ end)
 S1.CreateLabel({ Title = "Leave empty for default (no challenges)" })
 S1.CreateDropdown({
 	Title = "Map",
-	List = { "Grasslands", "Desert", "Swamp", "Jungle", "Frost Forest", "Volcano", "Atlantis" },
+	List = { "None", "Grasslands", "Desert", "Swamp", "Jungle", "Frost Forest", "Volcano", "Atlantis" },
 	Default = cfg.map,
 }, function(v)
 	cfg.map = v
@@ -235,6 +325,21 @@ S1.CreateToggle({ Title = "Send Created signal", Desc = "Same signal the game me
 	save()
 end)
 
+local SR = Page.CreateSection("RAID")
+SR.CreateDropdown({ Title = "Raid", List = RAID_NAMES, Default = cfg.raid }, function(v)
+	cfg.raid = v
+	save()
+end)
+SR.CreateDropdown({ Title = "Difficulty", List = { "Normal", "Hard", "Nightmare" }, Default = cfg.raidDifficulty }, function(v)
+	cfg.raidDifficulty = v
+	save()
+end)
+SR.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.raidMode }, function(v)
+	cfg.raidMode = v
+	save()
+end)
+SR.CreateLabel({ Title = "Pick a Map or a Raid. Set the other one to None." })
+
 local S2 = Page.CreateSection("Actions")
 local status = S2.CreateLabel({ Title = "Status: ready" })
 local function setStatus(t)
@@ -242,7 +347,7 @@ local function setStatus(t)
 end
 
 S2.CreateButton({ Title = "Join Now" }, function()
-	local ok, msg = joinOnce()
+	local ok, msg = joinSelected()
 	setStatus(msg)
 	warn("[FS] " .. (ok and "OK " or "FAILED ") .. msg)
 end)
@@ -256,7 +361,7 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 	if auto then
 		task.spawn(function()
 			while auto do
-				local ok, msg = joinOnce()
+				local ok, msg = joinSelected()
 				setStatus(msg)
 				warn("[FS] " .. (ok and "OK " or "FAILED ") .. msg)
 				task.wait(ok and 120 or 20)
@@ -265,4 +370,4 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 	end
 end)
 
-UI.CreateNoti({ Title = "Final Swarm v4", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v5", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
