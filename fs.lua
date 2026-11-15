@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v5)
+	Final Swarm - Lobby (v6)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -14,6 +14,11 @@
 	  RaidQueueService.RemoteFunction Invoke("EnterQueue")  -> true
 	  RaidQueueService.RemoteEvent    Fire("PartySizeSelected", <1-4>)
 	  RaidQueueService.RemoteEvent    Fire("Created")
+	Dungeon (recorded):
+	  DungeonQueueService.RemoteFunction Invoke("GetFloorLimit")      -> highest unlocked floor
+	  DungeonQueueService.RemoteFunction Invoke("EnterQueue", <floor>) -> true
+	  DungeonQueueService.RemoteEvent    Fire("PartySizeSelected", <1-4>)
+	  DungeonQueueService.RemoteEvent    Fire("Created")
 	The game starts automatically after the queue is created.
 ]]
 
@@ -31,6 +36,8 @@ local cfg = {
 	raid = "None",
 	raidDifficulty = "Normal",
 	raidMode = "Solo",
+	dungeonFloor = "None",
+	dungeonMode = "Solo",
 }
 pcall(function()
 	if isfile and isfile(FILE) then
@@ -39,6 +46,8 @@ pcall(function()
 		end
 	end
 end)
+
+cfg.created = true -- the "Created" signal is always sent (no UI toggle)
 
 -- migrate values saved by older versions
 local OLD_MODE = { ["2 Pemain"] = "Duo", ["3 Pemain"] = "Trio", ["4 Pemain"] = "Squad" }
@@ -105,12 +114,15 @@ local function getRemotes()
 		return nil
 	end
 	local ws, qs, rq = root.WorldSelection, root.QueueService, root:FindFirstChild("RaidQueueService")
+	local dq = root:FindFirstChild("DungeonQueueService")
 	return {
 		wsEvent = ws:FindFirstChildOfClass("RemoteEvent"),
 		wsFunc = ws:FindFirstChildOfClass("RemoteFunction"),
 		qsEvent = qs:FindFirstChildOfClass("RemoteEvent"),
 		rqEvent = rq and rq:FindFirstChildOfClass("RemoteEvent"),
 		rqFunc = rq and rq:FindFirstChildOfClass("RemoteFunction"),
+		dqEvent = dq and dq:FindFirstChildOfClass("RemoteEvent"),
+		dqFunc = dq and dq:FindFirstChildOfClass("RemoteFunction"),
 	}
 end
 
@@ -236,19 +248,59 @@ local function joinRaidOnce()
 	)
 end
 
--- joins the Campaign or the Raid, depending on which one is not "None"
+local function joinDungeonOnce()
+	local floor = tonumber(cfg.dungeonFloor)
+	if not floor then
+		return false, "Dungeon floor is None"
+	end
+	local r = getRemotes()
+	if not r or not r.dqEvent or not r.dqFunc then
+		return false, "dungeon remotes not found (are you in the lobby?)"
+	end
+	local size = PARTY_SIZE[cfg.dungeonMode] or 1
+	local okL, limit = pcall(function()
+		return r.dqFunc:InvokeServer("GetFloorLimit")
+	end)
+	limit = tonumber(limit)
+	if okL and limit and floor > limit then
+		floor = limit -- cannot enter a floor above the unlocked limit
+	end
+	task.wait(0.3)
+	local ok, res = pcall(function()
+		return r.dqFunc:InvokeServer("EnterQueue", floor)
+	end)
+	if not ok then
+		return false, "EnterQueue error: " .. tostring(res)
+	end
+	if res ~= true then
+		return false, "EnterQueue rejected: " .. tostring(res)
+	end
+	task.wait(0.4)
+	r.dqEvent:FireServer("PartySizeSelected", size)
+	task.wait(0.3)
+	r.dqEvent:FireServer("Created")
+	return true, ("dungeon queued: floor %d / %s, waiting for the game to start"):format(floor, tostring(cfg.dungeonMode))
+end
+
+-- joins whichever of Campaign / Raid / Dungeon is not "None"
 local function joinSelected()
-	local camp, raid = cfg.map ~= "None", cfg.raid ~= "None"
-	if camp and raid then
-		return false, "Set either Map or Raid to None"
+	local active = {}
+	if cfg.map ~= "None" then
+		active[#active + 1] = joinOnce
 	end
-	if raid then
-		return joinRaidOnce()
+	if cfg.raid ~= "None" then
+		active[#active + 1] = joinRaidOnce
 	end
-	if camp then
-		return joinOnce()
+	if tonumber(cfg.dungeonFloor) then
+		active[#active + 1] = joinDungeonOnce
 	end
-	return false, "Select a Map or a Raid first"
+	if #active > 1 then
+		return false, "Only one of Campaign / Raid / Dungeon can be active. Set the others to None"
+	end
+	if #active == 0 then
+		return false, "Select a Map, a Raid or a Dungeon floor first"
+	end
+	return active[1]()
 end
 
 local function leaveQueue()
@@ -260,6 +312,10 @@ local function leaveQueue()
 	end
 	if r and r.rqEvent then
 		r.rqEvent:FireServer("Exited")
+		done = true
+	end
+	if r and r.dqEvent then
+		r.dqEvent:FireServer("Exited")
 		done = true
 	end
 	return done
@@ -320,10 +376,6 @@ S1.CreateDropdown({
 	cfg.map = v
 	save()
 end)
-S1.CreateToggle({ Title = "Send Created signal", Desc = "Same signal the game menu sends", Default = cfg.created }, function(v)
-	cfg.created = v and true or false
-	save()
-end)
 
 local SR = Page.CreateSection("RAID")
 SR.CreateDropdown({ Title = "Raid", List = RAID_NAMES, Default = cfg.raid }, function(v)
@@ -338,7 +390,31 @@ SR.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, D
 	cfg.raidMode = v
 	save()
 end)
-SR.CreateLabel({ Title = "Pick a Map or a Raid. Set the other one to None." })
+
+local SD = Page.CreateSection("DUNGEON")
+-- floors available to this account (GetFloorLimit = highest unlocked floor)
+local floorNames = { "None", "1" }
+pcall(function()
+	local r = getRemotes()
+	if r and r.dqFunc then
+		local limit = tonumber(r.dqFunc:InvokeServer("GetFloorLimit"))
+		if limit and limit >= 1 then
+			floorNames = { "None" }
+			for i = 1, math.min(math.floor(limit), 100) do
+				floorNames[#floorNames + 1] = tostring(i)
+			end
+		end
+	end
+end)
+SD.CreateDropdown({ Title = "Floor", List = floorNames, Default = tostring(cfg.dungeonFloor) }, function(v)
+	cfg.dungeonFloor = v
+	save()
+end)
+SD.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.dungeonMode }, function(v)
+	cfg.dungeonMode = v
+	save()
+end)
+SD.CreateLabel({ Title = "Only one of Campaign / Raid / Dungeon can be active. Set the others to None." })
 
 local S2 = Page.CreateSection("Actions")
 local status = S2.CreateLabel({ Title = "Status: ready" })
@@ -370,4 +446,4 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 	end
 end)
 
-UI.CreateNoti({ Title = "Final Swarm v5", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v6", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
