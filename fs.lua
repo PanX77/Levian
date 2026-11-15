@@ -19,7 +19,7 @@ local FILE = "FinalSwarm/settings.json"
 local cfg = {
 	mode = "Solo",
 	difficulty = "Normal",
-	map = "grasslands",
+	map = "Grasslands",
 	created = true,
 	challenges = {},
 }
