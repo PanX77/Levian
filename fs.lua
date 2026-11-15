@@ -230,10 +230,6 @@ S1.CreateDropdown({
 	cfg.map = v
 	save()
 end)
-S1.CreateToggle({ Title = "Send Created signal", Desc = "Same signal the game menu sends", Default = cfg.created }, function(v)
-	cfg.created = v and true or false
-	save()
-end)
 
 local S2 = Page.CreateSection("Actions")
 local status = S2.CreateLabel({ Title = "Status: ready" })
