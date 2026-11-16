@@ -240,6 +240,13 @@ function ReadSetting()
 end
 Settings = ReadSetting()
 getgenv().Settings = Settings
+-- [PATCH] one-time defaults: Speed Tween = 350 and Distance Teleport Y = 350 (older saved values are replaced once)
+if not Settings["Tween350Migrated"] then
+	Settings["Speed Tween "] = 350
+	Settings["Distance Teleport Y"] = 350
+	Settings["Tween350Migrated"] = true
+	pcall(SaveSettings)
+end
 function PrepareMultiSelectList(b, t, A)
 	local a = {}
 	for s in pairs(b) do
@@ -5548,7 +5555,7 @@ local x, k, P, e, Y =
 local function H()
 	local B = getgenv().CharSpeed
 	if not B then
-		B = { cap = 300, nextRaise = 0 }
+		B = { cap = 350, nextRaise = 0 }
 		getgenv().CharSpeed = B
 	end
 	return B
@@ -5569,7 +5576,7 @@ local function B(Z, C, J, F)
 	if k.ActiveConnection and coroutine.status(k.ActiveConnection) == "suspended" then
 		pcall(coroutine.close, k.ActiveConnection)
 	end
-	J = math.clamp(tonumber(J) or 300, 1, 300) -- [PATCH] semua tween maks 300
+	J = math.clamp(tonumber(J) or 350, 1, 350) -- [PATCH] all tweens max 350
 	F = tonumber(F) or 2.5
 	k.LastTP = tick()
 	k.LastCF = C
@@ -5922,8 +5929,8 @@ function toTarget(P, e)
 	Z = CFrame.new()
 	Z = if ReadyToDodge
 		then (CFrame.new(0, 200, 0))
-		else if G then (CFrame.new(0, Settings["Distance Teleport Y"] or 800, 0)) else Z
-	Y, e = Settings["Speed Tween "] or 300, P * Z
+		else if G then (CFrame.new(0, Settings["Distance Teleport Y"] or 350, 0)) else Z
+	Y, e = Settings["Speed Tween "] or 350, P * Z
 	if (e.Position - H.Position).Magnitude < 3 and not ReadyToDodge and not G then
 		TweenManager.CancelTweenOnly()
 		H.CFrame = e
@@ -6809,7 +6816,7 @@ SettingFarmMainSection.CreateSlider(
 		Title = "Distance Teleport Y",
 		Min = 0,
 		Max = 10000,
-		Default = Settings["Distance Teleport Y"] or 800,
+		Default = Settings["Distance Teleport Y"] or 350,
 		Precise = true,
 	},
 	function(I)
@@ -6877,7 +6884,7 @@ SettingFarmMainSection.CreateToggle(
 	end
 )
 SettingFarmMainSection.CreateSlider(
-	{ Title = "Speed Tween ", Min = 0, Max = 300, Default = math.min(Settings["Speed Tween "] or 300, 300), Precise = true },
+	{ Title = "Speed Tween ", Min = 0, Max = 350, Default = math.min(Settings["Speed Tween "] or 350, 350), Precise = true },
 	function(I)
 		SaveSettings("Speed Tween ", I)
 	end

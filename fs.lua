@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v7)
+	Final Swarm - Lobby (v8)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -40,6 +40,9 @@ local cfg = {
 	raidMode = "Solo",
 	dungeonFloor = "None",
 	dungeonMode = "Solo",
+	cardPriority = "",
+	cardFallback = "Pick first card",
+	cardMaxRerolls = 3,
 }
 pcall(function()
 	if isfile then
@@ -331,6 +334,162 @@ local function leaveQueue()
 	return done
 end
 
+---------------------------------------------------------------- auto card (in-match)
+-- Card UI structure found with the scanner:
+--   PlayerGui.Frames.Upgrades.Holder.Selection1..N   (ImageButton, 3-5 cards, name in .ItemTitle)
+--   PlayerGui.Frames.Upgrades.RerollFrame            (Banish / Reroll buttons)
+-- Picking = pressing the card button, so the game itself sends the choice.
+local function localPG()
+	return game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+end
+
+local function isShown(o)
+	local pg = localPG()
+	local p = o
+	while p and p ~= pg do
+		if p:IsA("GuiObject") and not p.Visible then
+			return false
+		end
+		if p:IsA("ScreenGui") and not p.Enabled then
+			return false
+		end
+		p = p.Parent
+	end
+	return true
+end
+
+local function cleanText(t)
+	t = tostring(t or ""):gsub("<[^>]+>", "")
+	t = t:gsub("%s+", " ")
+	return (t:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function cardUI()
+	local pg = localPG()
+	local f = pg and pg:FindFirstChild("Frames")
+	local up = f and f:FindFirstChild("Upgrades")
+	return up, up and up:FindFirstChild("Holder"), up and up:FindFirstChild("RerollFrame")
+end
+
+local function getCards()
+	local up, holder = cardUI()
+	if not up or not holder or not isShown(up) then
+		return nil
+	end
+	local cards = {}
+	for _, c in ipairs(holder:GetChildren()) do
+		if c:IsA("GuiButton") and c.Name:match("^Selection%d+$") and isShown(c) then
+			local t = c:FindFirstChild("ItemTitle")
+			cards[#cards + 1] = { btn = c, name = cleanText(t and t.Text), x = c.AbsolutePosition.X }
+		end
+	end
+	table.sort(cards, function(a, b)
+		return a.x < b.x
+	end)
+	return (#cards > 0) and cards or nil
+end
+
+-- press a button the way a click does (the button has one connection, either Click or Activated)
+local function press(btn)
+	local ok = false
+	if firesignal then
+		pcall(function()
+			firesignal(btn.MouseButton1Click)
+			ok = true
+		end)
+		pcall(function()
+			firesignal(btn.Activated)
+			ok = true
+		end)
+	end
+	if not ok and getconnections then
+		pcall(function()
+			for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+				c:Fire()
+			end
+			for _, c in ipairs(getconnections(btn.Activated)) do
+				c:Fire()
+			end
+			ok = true
+		end)
+	end
+	return ok
+end
+
+local function rerollButton()
+	local _, _, rf = cardUI()
+	if not rf then
+		return nil
+	end
+	for _, c in ipairs(rf:GetDescendants()) do
+		if c:IsA("GuiButton") and c.Name:lower():find("reroll", 1, true) and isShown(c) then
+			return c
+		end
+	end
+	return nil
+end
+
+local function priorityTokens()
+	local out = {}
+	for token in tostring(cfg.cardPriority or ""):gmatch("[^,]+") do
+		local t = cleanText(token):lower()
+		if t ~= "" then
+			out[#out + 1] = t
+		end
+	end
+	return out
+end
+
+local function chooseCard(cards)
+	for _, tok in ipairs(priorityTokens()) do
+		for _, c in ipairs(cards) do
+			if c.name:lower():find(tok, 1, true) then
+				return c
+			end
+		end
+	end
+	return nil
+end
+
+local cardAuto, cardToken = false, nil
+local lastSig, lastAt, rerolls = "", 0, 0
+local function cardStep()
+	local cards = getCards()
+	if not cards then
+		lastSig, rerolls = "", 0
+		return
+	end
+	local names = {}
+	for _, c in ipairs(cards) do
+		names[#names + 1] = c.name
+	end
+	local sig = table.concat(names, "|")
+	if sig == lastSig and os.clock() - lastAt < 4 then
+		return -- already handled this offer
+	end
+	lastSig, lastAt = sig, os.clock()
+	task.wait(0.5) -- let the offer settle
+	local pick = chooseCard(cards)
+	if not pick then
+		local mode = cfg.cardFallback
+		if mode == "Do nothing" then
+			return
+		end
+		if mode == "Reroll" and rerolls < (tonumber(cfg.cardMaxRerolls) or 0) then
+			local rb = rerollButton()
+			if rb and press(rb) then
+				rerolls += 1
+				UI.CreateNoti({ Title = "Auto Card", Desc = "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls), ShowTime = 2 })
+				return
+			end
+		end
+		pick = cards[1]
+	end
+	if press(pick.btn) then
+		UI.CreateNoti({ Title = "Auto Card", Desc = "Picked: " .. (pick.name ~= "" and pick.name or "?"), ShowTime = 3 })
+	end
+end
+
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
 -- remove the close (x) button and use an X logo, in case the library on the server is an older version
@@ -463,6 +622,44 @@ end)
 
 local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
 local SF = PageF.CreateSection("AUTO CARD")
-SF.CreateLabel({ Title = "In development: waiting for the card UI data." })
+SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appear", Default = false }, function(v)
+	cardAuto = v and true or false
+	UI.CreateNoti({ Title = "Auto Card", Desc = cardAuto and "ON" or "OFF", ShowTime = 2 })
+	if cardAuto then
+		local token = {}
+		cardToken = token
+		task.spawn(function()
+			while cardAuto and cardToken == token do
+				pcall(cardStep)
+				task.wait(0.5)
+			end
+		end)
+	end
+end)
+SF.CreateBox({ Title = "Priority (comma separated, best first)", Default = cfg.cardPriority }, function(v)
+	cfg.cardPriority = type(v) == "string" and v or ""
+	save()
+end)
+SF.CreateDropdown({ Title = "If nothing matches", List = { "Pick first card", "Reroll", "Do nothing" }, Default = cfg.cardFallback }, function(v)
+	cfg.cardFallback = v
+	save()
+end)
+SF.CreateSlider({ Title = "Max rerolls per offer", Min = 0, Max = 10, Default = tonumber(cfg.cardMaxRerolls) or 3 }, function(v)
+	cfg.cardMaxRerolls = v
+	save()
+end)
+SF.CreateButton({ Title = "Show cards on screen" }, function()
+	local cards = getCards()
+	if not cards then
+		UI.CreateNoti({ Title = "Cards", Desc = "No card offer on screen", ShowTime = 3 })
+		return
+	end
+	local names = {}
+	for _, c in ipairs(cards) do
+		names[#names + 1] = c.name
+	end
+	UI.CreateNoti({ Title = "Cards (" .. #cards .. ")", Desc = table.concat(names, " | "), ShowTime = 6 })
+end)
+SF.CreateLabel({ Title = "Names are matched by text, e.g. Shotgun, Damage" })
 
-UI.CreateNoti({ Title = "Final Swarm v7", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v8", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
