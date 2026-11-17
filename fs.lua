@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v11)
+	Final Swarm - Lobby (v13)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -51,6 +51,8 @@ local cfg = {
 	bubbleName = "OxygenBubble",
 	bubbleStay = 5,
 	bubbleBelow = 80,
+	bubbleSpeed = 20,
+	walkRadius = 30,
 	oxygenPath = "",
 }
 pcall(function()
@@ -457,31 +459,125 @@ local function getCards()
 	return (#cards > 0) and cards or nil
 end
 
--- press a button the way a click does (the button has one connection, either Click or Activated)
-local function press(btn)
-	local ok = false
-	if firesignal then
-		pcall(function()
-			firesignal(btn.MouseButton1Click)
-			ok = true
-		end)
-		pcall(function()
-			firesignal(btn.Activated)
-			ok = true
-		end)
+-- Several ways to press a GUI button. The first one that visibly works is remembered (bestMethod).
+local function centerOf(b)
+	local gui = b:FindFirstAncestorOfClass("ScreenGui")
+	local inset = Vector2.zero
+	if not (gui and gui.IgnoreGuiInset) then
+		inset = game:GetService("GuiService"):GetGuiInset()
 	end
-	if not ok and getconnections then
-		pcall(function()
-			for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
-				c:Fire()
+	local p = b.AbsolutePosition + b.AbsoluteSize / 2 + inset
+	return p.X, p.Y
+end
+
+local METHODS = {
+	{
+		"signal",
+		function(b)
+			if not firesignal then
+				return false
 			end
-			for _, c in ipairs(getconnections(btn.Activated)) do
-				c:Fire()
+			local ran = false
+			for _, name in ipairs({ "MouseButton1Click", "Activated" }) do
+				local ok = pcall(function()
+					firesignal(b[name])
+				end)
+				ran = ran or ok
 			end
-			ok = true
-		end)
-	end
+			return ran
+		end,
+	},
+	{
+		"connections",
+		function(b)
+			if not getconnections then
+				return false
+			end
+			local n = 0
+			for _, name in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+				local ok, list = pcall(getconnections, b[name])
+				if ok and type(list) == "table" then
+					for _, c in ipairs(list) do
+						if type(c.Function) == "function" then
+							pcall(c.Function)
+						elseif c.Fire then
+							pcall(function()
+								c:Fire()
+							end)
+						end
+						n += 1
+					end
+				end
+			end
+			return n > 0
+		end,
+	},
+	{
+		"click",
+		function(b)
+			local okS, vim = pcall(function()
+				return game:GetService("VirtualInputManager")
+			end)
+			if not okS or not vim then
+				return false
+			end
+			local x, y = centerOf(b)
+			vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+			task.wait(0.06)
+			vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+			return true
+		end,
+	},
+	{
+		"touch",
+		function(b)
+			local okS, vim = pcall(function()
+				return game:GetService("VirtualInputManager")
+			end)
+			if not okS or not vim then
+				return false
+			end
+			local x, y = centerOf(b)
+			vim:SendTouchEvent(1, 0, x, y)
+			task.wait(0.06)
+			vim:SendTouchEvent(1, 2, x, y)
+			return true
+		end,
+	},
+}
+local bestMethod = nil
+
+-- press once with the best known method, no verification
+local function pressRaw(btn)
+	local m = METHODS[bestMethod or 1]
+	local ok = pcall(m[2], btn)
 	return ok
+end
+
+-- press and check (up to ~1s per method) that something changed; falls through to the next method otherwise
+local function pressVerified(btn, check)
+	local order = {}
+	if bestMethod then
+		order[1] = bestMethod
+	end
+	for i = 1, #METHODS do
+		if i ~= bestMethod then
+			order[#order + 1] = i
+		end
+	end
+	for _, i in ipairs(order) do
+		local ok, res = pcall(METHODS[i][2], btn)
+		if ok and res ~= false then
+			for _ = 1, 10 do
+				task.wait(0.1)
+				if check() then
+					bestMethod = i
+					return true, METHODS[i][1]
+				end
+			end
+		end
+	end
+	return false
 end
 
 local function frameButton(word)
@@ -518,43 +614,68 @@ local function chooseCard(cards)
 	return bestW or bestC
 end
 
-local cardAuto, cardToken = false, nil
-local lastSig, lastAt, rerolls, banishes = "", 0, 0, 0
-local function cardStep()
+local function offerSig()
 	local cards = getCards()
 	if not cards then
-		lastSig, rerolls, banishes = "", 0, 0
-		return
+		return nil
 	end
 	local names = {}
 	for _, c in ipairs(cards) do
 		names[#names + 1] = c.name
 	end
-	local sig = table.concat(names, "|")
+	return table.concat(names, "|")
+end
+
+local cardAuto, cardToken = false, nil
+local lastSig, lastAt, rerolls, banishes, failedSig = "", 0, 0, 0, nil
+local function cardStep()
+	local sig = offerSig()
+	if not sig then
+		lastSig, rerolls, banishes, failedSig = "", 0, 0, nil
+		return
+	end
 	if sig == lastSig and os.clock() - lastAt < 4 then
 		return -- this offer was already handled
 	end
 	lastSig, lastAt = sig, os.clock()
 	task.wait(0.5) -- let the offer settle
+	local cards = getCards()
+	if not cards then
+		return
+	end
+	local function changed()
+		return offerSig() ~= sig
+	end
+	-- press a card and only report success if the offer really changed
+	local function choose(c, label)
+		local ok, how = pressVerified(c.btn, changed)
+		if ok then
+			noti("Auto Card", label .. c.name .. " (" .. how .. ")", 3)
+			return true
+		end
+		if failedSig ~= sig then
+			failedSig = sig
+			noti("Auto Card", "Could not press: " .. c.name, 4)
+		end
+		return false
+	end
 
 	local pick = chooseCard(cards)
 	if pick then
-		if press(pick.btn) then
-			noti("Auto Card", "Picked: " .. pick.name, 3)
-		end
+		choose(pick, "Picked: ")
 		return
 	end
 
-	-- nothing wanted: banish an unwanted card (opt-in). Banish = press Banish, then press the card.
-	if cfg.cardBanish and banishes < 3 then
+	-- nothing wanted: banish an unwanted card (opt-in, only after a press method was verified once)
+	if cfg.cardBanish and bestMethod and banishes < 3 then
 		for _, c in ipairs(cards) do
 			if inList(cfg.banishList, c.name) then
 				local bb = frameButton("banish")
-				if bb and press(bb) then
+				if bb then
+					pressRaw(bb)
 					task.wait(0.5)
-					if press(c.btn) then
+					if choose(c, "Banished: ") then
 						banishes += 1
-						noti("Auto Card", "Banished: " .. c.name, 3)
 						return
 					end
 				end
@@ -569,10 +690,13 @@ local function cardStep()
 	end
 	if mode == "Reroll" and rerolls < (tonumber(cfg.cardMaxRerolls) or 0) then
 		local rb = frameButton("reroll")
-		if rb and press(rb) then
-			rerolls += 1
-			noti("Auto Card", "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls), 2)
-			return
+		if rb then
+			local ok, how = pressVerified(rb, changed)
+			if ok then
+				rerolls += 1
+				noti("Auto Card", "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls) .. " (" .. how .. ")", 2)
+				return
+			end
 		end
 	end
 	local fallback = cards[1]
@@ -582,9 +706,7 @@ local function cardStep()
 			break
 		end
 	end
-	if press(fallback.btn) then
-		noti("Auto Card", "Picked: " .. (fallback.name ~= "" and fallback.name or "?"), 3)
-	end
+	choose(fallback, "Picked: ")
 end
 
 ---------------------------------------------------------------- auto bubble (in-match)
@@ -592,7 +714,7 @@ end
 -- If that folder exists it is used directly; otherwise parts/models whose name contains the text in
 -- "Bubble name contains" are searched in the whole workspace.
 -- Safe  = Roblox's own walking (Humanoid:MoveTo)
--- Tween = moves the character toward the bubble at speed 20
+-- Tween = moves the character toward the bubble at the speed set by "Tween speed"
 ---------------------------------------------------------------- oxygen reading
 -- Returns oxygen as a percentage (0-100) and a short description of where it came from.
 -- Order: optional PlayerGui path from the menu -> attributes -> Value objects -> an "oxygen" bar in PlayerGui.
@@ -748,8 +870,8 @@ local function readOxygen()
 end
 
 local RunService = game:GetService("RunService")
-local BUBBLE_SPEED = 20
 local bubbleAuto, bubbleToken = false, nil
+local bubbleBusy = false -- true while the bubble loop is moving the character
 local bubbleCache, bubbleCacheAt, bubbleVisited = {}, 0, {}
 
 local function objPos(o)
@@ -815,7 +937,7 @@ local function bubbleLoop(token)
 				task.wait(0.5)
 			else
 				local started = os.clock()
-				local reached = false
+				bubbleBusy = true
 				while bubbleAuto and bubbleToken == token and os.clock() - started < 20 do
 					local inst = target.inst
 					if not inst.Parent or not hrp.Parent or hum.Health <= 0 then
@@ -823,12 +945,11 @@ local function bubbleLoop(token)
 					end
 					local dir = objPos(inst) - hrp.Position
 					if dir.Magnitude < 3 then
-						reached = true
 						break
 					end
 					if cfg.bubbleMode == "Tween" then
 						local dt = RunService.Heartbeat:Wait()
-						local step = math.min(BUBBLE_SPEED * dt, dir.Magnitude)
+						local step = math.min(math.max(tonumber(cfg.bubbleSpeed) or 20, 1) * dt, dir.Magnitude)
 						hrp.CFrame = hrp.CFrame + dir.Unit * step
 						hrp.AssemblyLinearVelocity = Vector3.zero
 					else
@@ -836,27 +957,54 @@ local function bubbleLoop(token)
 						task.wait(0.25)
 					end
 				end
-				-- stay inside the bubble for a while (oxygen refills while you are in it)
-				local stay = tonumber(cfg.bubbleStay) or 0
-				local t0 = os.clock()
-				while
-					reached
-					and stay > 0
-					and bubbleAuto
-					and bubbleToken == token
-					and os.clock() - t0 < stay
-					and target.inst.Parent
-					and hum.Health > 0
-				do
-					local o = readOxygen()
-					if o and o >= 99 then
-						break -- oxygen is full
-					end
-					task.wait(0.25)
-				end
 				bubbleVisited[target.inst] = os.clock()
+				bubbleBusy = false
 			end
 			end
+		end
+	end
+end
+
+---------------------------------------------------------------- walk around (in-match)
+-- Walks to random points around where you were when it was switched on (Roblox walking, Humanoid:MoveTo).
+-- It pauses while Auto Bubble is moving the character.
+local walkAuto, walkToken = false, nil
+local function groundAt(pos, char)
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { char }
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local hit = workspace:Raycast(pos + Vector3.new(0, 60, 0), Vector3.new(0, -200, 0), params)
+	return hit and hit.Position.Y or pos.Y
+end
+
+local function walkLoop(token)
+	local center
+	while walkAuto and walkToken == token do
+		local char = game:GetService("Players").LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then
+			center = nil
+			task.wait(1)
+		elseif bubbleBusy then
+			center = nil -- take a new centre after the bubble trip
+			task.wait(0.3)
+		else
+			center = center or hrp.Position
+			local r = math.max(tonumber(cfg.walkRadius) or 30, 5)
+			local ang, dist = math.random() * math.pi * 2, 5 + math.random() * (r - 5)
+			local flat = center + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
+			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
+			hum:MoveTo(target)
+			local t0 = os.clock()
+			while walkAuto and walkToken == token and not bubbleBusy and os.clock() - t0 < 6 do
+				local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
+				if math.sqrt(dx * dx + dz * dz) < 3 then
+					break
+				end
+				task.wait(0.2)
+			end
+			task.wait(0.3 + math.random() * 1.2) -- short pause like a player
 		end
 	end
 end
@@ -1054,6 +1202,9 @@ SF.CreateLabel({ Title = "Auto Banish: if no banish is left, the card may be pic
 local SB = PageF.CreateSection("AUTO BUBBLE")
 SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", Default = false }, function(v)
 	bubbleAuto = v and true or false
+	if not bubbleAuto then
+		bubbleBusy = false
+	end
 	UI.CreateNoti({ Title = "Auto Bubble", Desc = bubbleAuto and ("ON - " .. tostring(cfg.bubbleMode)) or "OFF", ShowTime = 2 })
 	if bubbleAuto then
 		local token = {}
@@ -1069,12 +1220,8 @@ SB.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.bu
 	cfg.bubbleMode = v
 	save()
 end)
-SB.CreateBox({ Title = "Bubble name contains", Default = cfg.bubbleName }, function(v)
-	cfg.bubbleName = (type(v) == "string" and v ~= "") and v or "bubble"
-	save()
-end)
-SB.CreateSlider({ Title = "Stay in bubble (seconds)", Min = 0, Max = 30, Default = tonumber(cfg.bubbleStay) or 5 }, function(v)
-	cfg.bubbleStay = v
+SB.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.bubbleSpeed) or 20 }, function(v)
+	cfg.bubbleSpeed = v
 	save()
 end)
 SB.CreateBox({ Title = "Oxygen UI path (optional)", Default = cfg.oxygenPath }, function(v)
@@ -1090,6 +1237,21 @@ SB.CreateButton({ Title = "Show oxygen reading" }, function()
 	end
 end)
 SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
-SB.CreateLabel({ Title = "Safe: walks normally. Tween: moves at speed 20." })
 
-UI.CreateNoti({ Title = "Final Swarm v11", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local SW = PageF.CreateSection("WALK AROUND")
+SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
+	walkAuto = v and true or false
+	UI.CreateNoti({ Title = "Walk Around", Desc = walkAuto and "ON" or "OFF", ShowTime = 2 })
+	if walkAuto then
+		local token = {}
+		walkToken = token
+		task.spawn(walkLoop, token)
+	end
+end)
+SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
+	cfg.walkRadius = v
+	save()
+end)
+SW.CreateLabel({ Title = "Pauses while Auto Bubble is moving." })
+
+UI.CreateNoti({ Title = "Final Swarm v13", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
