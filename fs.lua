@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v15)
+	Final Swarm - Lobby (v16)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -59,6 +59,8 @@ local cfg = {
 	riftName = "rift",
 	riftTargets = { "Rift", "Crystal", "Circle" },
 	pressMethod = "",
+	afterMatch = "Nothing",
+	afterDelay = 3,
 	oxygenPath = "",
 }
 pcall(function()
@@ -1160,6 +1162,89 @@ local function walkLoop(token)
 	end
 end
 
+---------------------------------------------------------------- after match (replay / lobby)
+-- Acts only when a ScreenGui shows a Replay-like button AND a Lobby-like button at the same time
+-- (the result screen), so it can never press "Lobby" in the middle of a match.
+local function buttonLabel(b)
+	if b:IsA("TextButton") and b.Text ~= "" then
+		return cleanText(b.Text)
+	end
+	for _, c in ipairs(b:GetDescendants()) do
+		if (c:IsA("TextLabel") or c:IsA("TextButton")) and c.Text ~= "" then
+			return cleanText(c.Text)
+		end
+	end
+	return ""
+end
+
+local function resultButtons()
+	local pg = localPG()
+	if not pg then
+		return nil
+	end
+	for _, gui in ipairs(pg:GetChildren()) do
+		if gui:IsA("ScreenGui") and gui.Enabled then
+			local replay, lobby
+			for _, d in ipairs(gui:GetDescendants()) do
+				if d:IsA("GuiButton") and isShown(d) then
+					local n = norm(buttonLabel(d))
+					if not replay and (n:find("replay", 1, true) or n:find("playagain", 1, true) or n:find("retry", 1, true)) then
+						replay = d
+					elseif not lobby and n:find("lobby", 1, true) then
+						lobby = d
+					end
+				end
+			end
+			if replay and lobby then
+				return replay, lobby
+			end
+		end
+	end
+	return nil
+end
+
+local afterSeenAt, afterDoneAt, afterFailed = nil, 0, false
+local function afterStep()
+	if cfg.afterMatch == "Nothing" then
+		afterSeenAt = nil
+		return
+	end
+	if os.clock() - afterDoneAt < 20 then
+		return
+	end
+	local replay, lobby = resultButtons()
+	if not replay then
+		afterSeenAt, afterFailed = nil, false
+		return
+	end
+	afterSeenAt = afterSeenAt or os.clock()
+	if os.clock() - afterSeenAt < (tonumber(cfg.afterDelay) or 3) then
+		return
+	end
+	local btn = (cfg.afterMatch == "Replay") and replay or lobby
+	local label = buttonLabel(btn)
+	local ok, how = pressVerified(btn, function()
+		return not btn.Parent or not isShown(btn)
+	end)
+	if ok then
+		afterDoneAt = os.clock()
+		noti("After match", cfg.afterMatch .. ": " .. label .. " (" .. how .. ")", 4)
+	elseif not afterFailed then
+		afterFailed = true
+		noti("After match", "Could not press: " .. label, 4)
+	end
+end
+
+-- one background loop (a newer run of the script replaces the older one)
+local afterToken = {}
+getgenv().__LV_AFTER = afterToken
+task.spawn(function()
+	while getgenv().__LV_AFTER == afterToken do
+		pcall(afterStep)
+		task.wait(1.5)
+	end
+end)
+
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
 -- remove the close (x) button and use an X logo, in case the library on the server is an older version
@@ -1435,4 +1520,23 @@ SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(
 end)
 SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
 
-UI.CreateNoti({ Title = "Final Swarm v15", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local SA = PageF.CreateSection("AFTER MATCH")
+SA.CreateDropdown({ Title = "When the match ends", List = { "Nothing", "Replay", "Lobby" }, Default = cfg.afterMatch }, function(v)
+	cfg.afterMatch = v
+	save()
+end)
+SA.CreateSlider({ Title = "Delay (seconds)", Min = 0, Max = 30, Default = tonumber(cfg.afterDelay) or 3 }, function(v)
+	cfg.afterDelay = v
+	save()
+end)
+SA.CreateButton({ Title = "Show result buttons" }, function()
+	local replay, lobby = resultButtons()
+	if replay then
+		noti("Result screen", "Replay: " .. buttonLabel(replay) .. " | Lobby: " .. buttonLabel(lobby), 6)
+	else
+		noti("Result screen", "Not on screen", 3)
+	end
+end)
+SA.CreateLabel({ Title = "Acts only when the Replay and Lobby buttons are both on screen." })
+
+UI.CreateNoti({ Title = "Final Swarm v16", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
