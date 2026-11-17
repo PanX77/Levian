@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v13)
+	Final Swarm - Lobby (v14)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -53,6 +53,10 @@ local cfg = {
 	bubbleBelow = 80,
 	bubbleSpeed = 20,
 	walkRadius = 30,
+	riftMode = "Safe",
+	riftSpeed = 20,
+	riftStay = true,
+	riftName = "rift",
 	oxygenPath = "",
 }
 pcall(function()
@@ -965,9 +969,106 @@ local function bubbleLoop(token)
 	end
 end
 
+---------------------------------------------------------------- auto rift (in-match)
+-- Goes to the nearest object whose name contains "Rift name contains" (default "rift").
+-- Safe = Roblox walking (Humanoid:MoveTo), Tween = moves at the "Tween speed" set in the menu.
+-- With "Stay at rift" on it stays next to the rift while it exists. Auto Bubble has priority (oxygen).
+local riftAuto, riftToken = false, nil
+local riftBusy = false -- true while the rift loop is moving the character
+local riftCache, riftCacheAt, riftVisited = {}, 0, {}
+
+local function riftCandidates(hrp, char)
+	if os.clock() - riftCacheAt > 1 then
+		riftCacheAt = os.clock()
+		riftCache = {}
+		local pat = norm(cfg.riftName)
+		if pat == "" then
+			pat = "rift"
+		end
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if (d:IsA("BasePart") or d:IsA("Model")) and not d:IsDescendantOf(char) and norm(d.Name):find(pat, 1, true) then
+				riftCache[#riftCache + 1] = d
+			end
+		end
+	end
+	local set = {}
+	for _, d in ipairs(riftCache) do
+		set[d] = true
+	end
+	local out = {}
+	for _, d in ipairs(riftCache) do
+		if d.Parent and (not riftVisited[d] or os.clock() - riftVisited[d] > 8) then
+			-- skip parts that belong to a model that is already a candidate
+			local nested, p = false, d.Parent
+			while p and p ~= workspace do
+				if set[p] then
+					nested = true
+					break
+				end
+				p = p.Parent
+			end
+			if not nested then
+				local pos = objPos(d)
+				out[#out + 1] = { inst = d, pos = pos, dist = (pos - hrp.Position).Magnitude }
+			end
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.dist < b.dist
+	end)
+	return out
+end
+
+local function riftLoop(token)
+	while riftAuto and riftToken == token do
+		local char = game:GetService("Players").LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then
+			task.wait(1)
+		elseif bubbleBusy then
+			task.wait(0.3) -- oxygen first
+		else
+			local target = riftCandidates(hrp, char)[1]
+			if not target then
+				task.wait(0.5)
+			else
+				local started = os.clock()
+				riftBusy = true
+				while riftAuto and riftToken == token and not bubbleBusy and os.clock() - started < 25 do
+					local inst = target.inst
+					if not inst.Parent or not hrp.Parent or hum.Health <= 0 then
+						break
+					end
+					local pos = objPos(inst)
+					local dir = pos - hrp.Position
+					if dir.Magnitude < 4 then
+						if not cfg.riftStay then
+							break
+						end
+						task.wait(0.3) -- stay next to the rift
+						started = os.clock()
+					elseif cfg.riftMode == "Tween" then
+						local dt = RunService.Heartbeat:Wait()
+						local step = math.min(math.max(tonumber(cfg.riftSpeed) or 20, 1) * dt, dir.Magnitude)
+						hrp.CFrame = hrp.CFrame + dir.Unit * step
+						hrp.AssemblyLinearVelocity = Vector3.zero
+					else
+						hum:MoveTo(pos)
+						task.wait(0.25)
+					end
+				end
+				riftVisited[target.inst] = os.clock()
+				riftBusy = false
+			end
+		end
+	end
+	riftBusy = false
+end
+
 ---------------------------------------------------------------- walk around (in-match)
 -- Walks to random points around where you were when it was switched on (Roblox walking, Humanoid:MoveTo).
--- It pauses while Auto Bubble is moving the character.
+-- It pauses while Auto Bubble or Auto Rift is moving the character.
 local walkAuto, walkToken = false, nil
 local function groundAt(pos, char)
 	local params = RaycastParams.new()
@@ -986,8 +1087,8 @@ local function walkLoop(token)
 		if not hrp or not hum or hum.Health <= 0 then
 			center = nil
 			task.wait(1)
-		elseif bubbleBusy then
-			center = nil -- take a new centre after the bubble trip
+		elseif bubbleBusy or riftBusy then
+			center = nil -- take a new centre after the bubble/rift trip
 			task.wait(0.3)
 		else
 			center = center or hrp.Position
@@ -997,7 +1098,7 @@ local function walkLoop(token)
 			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
 			hum:MoveTo(target)
 			local t0 = os.clock()
-			while walkAuto and walkToken == token and not bubbleBusy and os.clock() - t0 < 6 do
+			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and os.clock() - t0 < 6 do
 				local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
 				if math.sqrt(dx * dx + dz * dz) < 3 then
 					break
@@ -1238,6 +1339,36 @@ SB.CreateButton({ Title = "Show oxygen reading" }, function()
 end)
 SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
 
+local SR = PageF.CreateSection("AUTO RIFT")
+SR.CreateToggle({ Title = "Auto Rift", Desc = "Moves to the nearest rift", Default = false }, function(v)
+	riftAuto = v and true or false
+	UI.CreateNoti({ Title = "Auto Rift", Desc = riftAuto and ("ON - " .. tostring(cfg.riftMode)) or "OFF", ShowTime = 2 })
+	if riftAuto then
+		local token = {}
+		riftToken = token
+		task.spawn(riftLoop, token)
+	else
+		riftBusy = false
+	end
+end)
+SR.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.riftMode }, function(v)
+	cfg.riftMode = v
+	save()
+end)
+SR.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.riftSpeed) or 20 }, function(v)
+	cfg.riftSpeed = v
+	save()
+end)
+SR.CreateToggle({ Title = "Stay at rift", Desc = "Stays next to the rift while it exists", Default = cfg.riftStay }, function(v)
+	cfg.riftStay = v and true or false
+	save()
+end)
+SR.CreateBox({ Title = "Rift name contains", Default = cfg.riftName }, function(v)
+	cfg.riftName = (type(v) == "string" and v ~= "") and v or "rift"
+	save()
+end)
+SR.CreateLabel({ Title = "Auto Bubble has priority when oxygen is low." })
+
 local SW = PageF.CreateSection("WALK AROUND")
 SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
 	walkAuto = v and true or false
@@ -1252,6 +1383,6 @@ SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(
 	cfg.walkRadius = v
 	save()
 end)
-SW.CreateLabel({ Title = "Pauses while Auto Bubble is moving." })
+SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
 
-UI.CreateNoti({ Title = "Final Swarm v13", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v14", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
