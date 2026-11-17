@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v14)
+	Final Swarm - Lobby (v15)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -57,6 +57,8 @@ local cfg = {
 	riftSpeed = 20,
 	riftStay = true,
 	riftName = "rift",
+	riftTargets = { "Rift", "Crystal", "Circle" },
+	pressMethod = "",
 	oxygenPath = "",
 }
 pcall(function()
@@ -549,7 +551,17 @@ local METHODS = {
 		end,
 	},
 }
+-- real-input style first; the method that worked last time is remembered between sessions
+local PREF = { click = 1, connections = 2, signal = 3, touch = 4 }
+table.sort(METHODS, function(a, b)
+	return PREF[a[1]] < PREF[b[1]]
+end)
 local bestMethod = nil
+for i, m in ipairs(METHODS) do
+	if m[1] == cfg.pressMethod then
+		bestMethod = i
+	end
+end
 
 -- press once with the best known method, no verification
 local function pressRaw(btn)
@@ -572,16 +584,45 @@ local function pressVerified(btn, check)
 	for _, i in ipairs(order) do
 		local ok, res = pcall(METHODS[i][2], btn)
 		if ok and res ~= false then
-			for _ = 1, 10 do
-				task.wait(0.1)
+			for _ = 1, 20 do
+				task.wait(0.05)
 				if check() then
 					bestMethod = i
+					if cfg.pressMethod ~= METHODS[i][1] then
+						cfg.pressMethod = METHODS[i][1]
+						save()
+					end
 					return true, METHODS[i][1]
 				end
 			end
 		end
 	end
 	return false
+end
+
+-- manual players click anywhere to skip the card-reveal animation: click the (non-button) title area
+local function skipAnimation()
+	local up = cardUI()
+	local target = up and up:FindFirstChild("TitleFrame")
+	if not target then
+		return
+	end
+	local okS, vim = pcall(function()
+		return game:GetService("VirtualInputManager")
+	end)
+	if not okS or not vim then
+		return
+	end
+	for _ = 1, 2 do
+		local x, y = centerOf(target)
+		x, y = x + math.random(-15, 15), y + math.random(-4, 4)
+		pcall(function()
+			vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+			task.wait(0.03)
+			vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+		end)
+		task.wait(0.08)
+	end
 end
 
 local function frameButton(word)
@@ -642,11 +683,14 @@ local function cardStep()
 		return -- this offer was already handled
 	end
 	lastSig, lastAt = sig, os.clock()
-	task.wait(0.5) -- let the offer settle
+	skipAnimation()
+	task.wait(0.1)
 	local cards = getCards()
 	if not cards then
 		return
 	end
+	sig = offerSig() or sig -- the offer may still have been filling in: use what is on screen now
+	lastSig = sig
 	local function changed()
 		return offerSig() ~= sig
 	end
@@ -970,7 +1014,9 @@ local function bubbleLoop(token)
 end
 
 ---------------------------------------------------------------- auto rift (in-match)
--- Goes to the nearest object whose name contains "Rift name contains" (default "rift").
+-- Rift objects live in workspace.Map.RiftRuntime (found with the scanner):
+--   Rift (Model)  |  Shard.Crystal (MeshParts)  |  Checkpoint.Circle (MeshPart)
+-- It goes to the nearest one of the target types chosen in the menu.
 -- Safe = Roblox walking (Humanoid:MoveTo), Tween = moves at the "Tween speed" set in the menu.
 -- With "Stay at rift" on it stays next to the rift while it exists. Auto Bubble has priority (oxygen).
 local riftAuto, riftToken = false, nil
@@ -981,13 +1027,17 @@ local function riftCandidates(hrp, char)
 	if os.clock() - riftCacheAt > 1 then
 		riftCacheAt = os.clock()
 		riftCache = {}
-		local pat = norm(cfg.riftName)
-		if pat == "" then
-			pat = "rift"
-		end
-		for _, d in ipairs(workspace:GetDescendants()) do
-			if (d:IsA("BasePart") or d:IsA("Model")) and not d:IsDescendantOf(char) and norm(d.Name):find(pat, 1, true) then
-				riftCache[#riftCache + 1] = d
+		local map = workspace:FindFirstChild("Map")
+		local root = map and map:FindFirstChild("RiftRuntime")
+		if root then
+			local want = {}
+			for _, n in ipairs(cfg.riftTargets or {}) do
+				want[norm(n)] = true
+			end
+			for _, d in ipairs(root:GetDescendants()) do
+				if (d:IsA("BasePart") or d:IsA("Model")) and want[norm(d.Name)] then
+					riftCache[#riftCache + 1] = d
+				end
 			end
 		end
 	end
@@ -1252,7 +1302,7 @@ SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appe
 		task.spawn(function()
 			while cardAuto and cardToken == token do
 				pcall(cardStep)
-				task.wait(0.5)
+				task.wait(0.2)
 			end
 		end)
 	end
@@ -1363,8 +1413,8 @@ SR.CreateToggle({ Title = "Stay at rift", Desc = "Stays next to the rift while i
 	cfg.riftStay = v and true or false
 	save()
 end)
-SR.CreateBox({ Title = "Rift name contains", Default = cfg.riftName }, function(v)
-	cfg.riftName = (type(v) == "string" and v ~= "") and v or "rift"
+SR.CreateDropdown({ Title = "Targets", List = { "Rift", "Crystal", "Circle" }, Multi = true, Default = cfg.riftTargets }, function(sel)
+	cfg.riftTargets = toArray({ "Rift", "Crystal", "Circle" }, sel)
 	save()
 end)
 SR.CreateLabel({ Title = "Auto Bubble has priority when oxygen is low." })
@@ -1385,4 +1435,4 @@ SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(
 end)
 SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
 
-UI.CreateNoti({ Title = "Final Swarm v14", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v15", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
