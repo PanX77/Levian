@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v8)
+	Final Swarm - Lobby (v11)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -40,9 +40,18 @@ local cfg = {
 	raidMode = "Solo",
 	dungeonFloor = "None",
 	dungeonMode = "Solo",
-	cardPriority = "",
 	cardFallback = "Pick first card",
 	cardMaxRerolls = 3,
+	cardPrefer = "Weapons first",
+	cardBanish = false,
+	weaponsWanted = {},
+	cardsWanted = {},
+	banishList = {},
+	bubbleMode = "Safe",
+	bubbleName = "OxygenBubble",
+	bubbleStay = 5,
+	bubbleBelow = 80,
+	oxygenPath = "",
 }
 pcall(function()
 	if isfile then
@@ -336,9 +345,68 @@ end
 
 ---------------------------------------------------------------- auto card (in-match)
 -- Card UI structure found with the scanner:
---   PlayerGui.Frames.Upgrades.Holder.Selection1..N   (ImageButton, 3-5 cards, name in .ItemTitle)
---   PlayerGui.Frames.Upgrades.RerollFrame            (Banish / Reroll buttons)
+--   PlayerGui.Frames.Upgrades.Holder.Selection1..N      (ImageButton, 3-5 offers; name in .ItemTitle)
+--   PlayerGui.Frames.Upgrades.RerollFrame.RerollButton  (re-roll the offers)
+--   PlayerGui.Frames.Upgrades.RerollFrame.BanishButton  (press it, then press the card to remove)
 -- Picking = pressing the card button, so the game itself sends the choice.
+local WEAPONS = {
+	"Daggers", "Bow", "Sword", "Shotgun", "Revolver", "Frost Walker", "Paintball Gun", "Poison Flask",
+	"Ninja Star", "Spike Ball", "Flame Walker", "Lightning Staff", "Bananarang", "Sniper", "Axe", "Missile",
+	"Firestaff", "Tornado", "Flamethrower", "Aura", "Pumpkin Staff", "Minigun", "Ban Hammer", "Trident",
+	"Laserbeam", "Excalibur", "Cursed Diary", "Subspace Tripmine", "Mjolnir", "Aegis", "Void Scythe",
+	"Jack-o'-Launcher", "Inferno Sword",
+}
+local CARDS = {
+	"Armor", "Attack Speed", "Crit Chance", "Crit Damage", "Damage", "Health", "Knock Resistance", "Luck",
+	"Movement Speed", "Projectile Speed", "Regen", "Blaze", "Boss Damage", "Demon Slayer", "Firestorm",
+	"Freeze", "Frostwater", "Landslide", "Lifesteal", "Lightning Rod", "Nightshade", "Piercing", "Prismatic",
+	"Purity", "Ricochet", "Size", "Stand Strong", "Thorns", "XP Gain", "Giant Strength", "Projectile Count",
+	"Soul Swiftness", "Wind Blessing", "Extra Jump", "Multishot", "Power Trio", "Undying",
+}
+local BANISH_ALL = {}
+for _, n in ipairs(WEAPONS) do
+	BANISH_ALL[#BANISH_ALL + 1] = n
+end
+for _, n in ipairs(CARDS) do
+	BANISH_ALL[#BANISH_ALL + 1] = n
+end
+
+local function norm(s)
+	return (tostring(s or ""):lower():gsub("[^%w]", ""))
+end
+-- alternative spellings that may appear in the game
+local ALIAS = { pumpkinstaff = { "pumkinstaff" }, mjolnir = { "mjolnier" }, critchance = { "critchange" } }
+local function nameMatches(offered, listed)
+	local a, b = norm(offered), norm(listed)
+	if a == b then
+		return true
+	end
+	for _, al in ipairs(ALIAS[b] or {}) do
+		if a == al then
+			return true
+		end
+	end
+	return false
+end
+local function inList(list, name)
+	for _, n in ipairs(list or {}) do
+		if nameMatches(name, n) then
+			return true
+		end
+	end
+	return false
+end
+-- multi-select result (set) -> array in list order
+local function toArray(order, sel)
+	local out = {}
+	for _, n in ipairs(order) do
+		if type(sel) == "table" and sel[n] then
+			out[#out + 1] = n
+		end
+	end
+	return out
+end
+
 local function localPG()
 	return game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
 end
@@ -416,47 +484,46 @@ local function press(btn)
 	return ok
 end
 
-local function rerollButton()
+local function frameButton(word)
 	local _, _, rf = cardUI()
 	if not rf then
 		return nil
 	end
 	for _, c in ipairs(rf:GetDescendants()) do
-		if c:IsA("GuiButton") and c.Name:lower():find("reroll", 1, true) and isShown(c) then
+		if c:IsA("GuiButton") and c.Name:lower():find(word, 1, true) and isShown(c) then
 			return c
 		end
 	end
 	return nil
 end
 
-local function priorityTokens()
-	local out = {}
-	for token in tostring(cfg.cardPriority or ""):gmatch("[^,]+") do
-		local t = cleanText(token):lower()
-		if t ~= "" then
-			out[#out + 1] = t
-		end
-	end
-	return out
+local function noti(title, desc, t)
+	UI.CreateNoti({ Title = title, Desc = desc, ShowTime = t or 3 })
 end
 
+-- pick a wanted card: weapons and cards are separate lists, "Prefer" decides which wins
 local function chooseCard(cards)
-	for _, tok in ipairs(priorityTokens()) do
-		for _, c in ipairs(cards) do
-			if c.name:lower():find(tok, 1, true) then
-				return c
-			end
+	local bestW, bestC
+	for _, c in ipairs(cards) do
+		if not bestW and inList(cfg.weaponsWanted, c.name) then
+			bestW = c
+		end
+		if not bestC and inList(cfg.cardsWanted, c.name) then
+			bestC = c
 		end
 	end
-	return nil
+	if cfg.cardPrefer == "Cards first" then
+		return bestC or bestW
+	end
+	return bestW or bestC
 end
 
 local cardAuto, cardToken = false, nil
-local lastSig, lastAt, rerolls = "", 0, 0
+local lastSig, lastAt, rerolls, banishes = "", 0, 0, 0
 local function cardStep()
 	local cards = getCards()
 	if not cards then
-		lastSig, rerolls = "", 0
+		lastSig, rerolls, banishes = "", 0, 0
 		return
 	end
 	local names = {}
@@ -465,28 +532,332 @@ local function cardStep()
 	end
 	local sig = table.concat(names, "|")
 	if sig == lastSig and os.clock() - lastAt < 4 then
-		return -- already handled this offer
+		return -- this offer was already handled
 	end
 	lastSig, lastAt = sig, os.clock()
 	task.wait(0.5) -- let the offer settle
+
 	local pick = chooseCard(cards)
-	if not pick then
-		local mode = cfg.cardFallback
-		if mode == "Do nothing" then
-			return
+	if pick then
+		if press(pick.btn) then
+			noti("Auto Card", "Picked: " .. pick.name, 3)
 		end
-		if mode == "Reroll" and rerolls < (tonumber(cfg.cardMaxRerolls) or 0) then
-			local rb = rerollButton()
-			if rb and press(rb) then
-				rerolls += 1
-				UI.CreateNoti({ Title = "Auto Card", Desc = "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls), ShowTime = 2 })
-				return
+		return
+	end
+
+	-- nothing wanted: banish an unwanted card (opt-in). Banish = press Banish, then press the card.
+	if cfg.cardBanish and banishes < 3 then
+		for _, c in ipairs(cards) do
+			if inList(cfg.banishList, c.name) then
+				local bb = frameButton("banish")
+				if bb and press(bb) then
+					task.wait(0.5)
+					if press(c.btn) then
+						banishes += 1
+						noti("Auto Card", "Banished: " .. c.name, 3)
+						return
+					end
+				end
+				break
 			end
 		end
-		pick = cards[1]
 	end
-	if press(pick.btn) then
-		UI.CreateNoti({ Title = "Auto Card", Desc = "Picked: " .. (pick.name ~= "" and pick.name or "?"), ShowTime = 3 })
+
+	local mode = cfg.cardFallback
+	if mode == "Do nothing" then
+		return
+	end
+	if mode == "Reroll" and rerolls < (tonumber(cfg.cardMaxRerolls) or 0) then
+		local rb = frameButton("reroll")
+		if rb and press(rb) then
+			rerolls += 1
+			noti("Auto Card", "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls), 2)
+			return
+		end
+	end
+	local fallback = cards[1]
+	for _, c in ipairs(cards) do
+		if not inList(cfg.banishList, c.name) then
+			fallback = c
+			break
+		end
+	end
+	if press(fallback.btn) then
+		noti("Auto Card", "Picked: " .. (fallback.name ~= "" and fallback.name or "?"), 3)
+	end
+end
+
+---------------------------------------------------------------- auto bubble (in-match)
+-- The scanner showed the bubbles are Models named "OxygenBubble" inside workspace.EnvironmentOxygenBubbles.
+-- If that folder exists it is used directly; otherwise parts/models whose name contains the text in
+-- "Bubble name contains" are searched in the whole workspace.
+-- Safe  = Roblox's own walking (Humanoid:MoveTo)
+-- Tween = moves the character toward the bubble at speed 20
+---------------------------------------------------------------- oxygen reading
+-- Returns oxygen as a percentage (0-100) and a short description of where it came from.
+-- Order: optional PlayerGui path from the menu -> attributes -> Value objects -> an "oxygen" bar in PlayerGui.
+local function percentFromGui(o)
+	if o:IsA("TextLabel") or o:IsA("TextButton") then
+		local txt = cleanText(o.Text)
+		local a, b = txt:match("(%d+%.?%d*)%s*/%s*(%d+%.?%d*)")
+		if a and b and tonumber(b) > 0 then
+			return tonumber(a) / tonumber(b) * 100
+		end
+		local pct = txt:match("(%d+%.?%d*)%s*%%")
+		if pct then
+			return tonumber(pct)
+		end
+		return nil
+	end
+	if o:IsA("GuiObject") then
+		local p = o.Parent
+		if p and p:IsA("GuiObject") then
+			local ps, os_ = p.AbsoluteSize, o.AbsoluteSize
+			if ps.X >= ps.Y and ps.X > 0 then
+				return math.clamp(os_.X / ps.X * 100, 0, 100)
+			elseif ps.Y > 0 then
+				return math.clamp(os_.Y / ps.Y * 100, 0, 100)
+			end
+		end
+	end
+	return nil
+end
+
+local function resolvePath(path)
+	local cur = localPG()
+	for part in tostring(path):gmatch("[^%.]+") do
+		cur = cur and cur:FindFirstChild(part)
+	end
+	return cur
+end
+
+local function fromAttributes(inst)
+	local cur, max
+	for name, v in pairs(inst:GetAttributes()) do
+		local n = name:lower()
+		if type(v) == "number" and n:find("oxygen", 1, true) then
+			if n:find("max", 1, true) then
+				max = v
+			else
+				cur = cur or v
+			end
+		end
+	end
+	if cur then
+		if max and max > 0 then
+			return math.clamp(cur / max * 100, 0, 100)
+		end
+		if cur <= 1 then
+			return cur * 100
+		end
+		return math.clamp(cur, 0, 100)
+	end
+	return nil
+end
+
+local function fromValues(root)
+	local cur, max
+	for _, v in ipairs(root:GetDescendants()) do
+		if (v:IsA("NumberValue") or v:IsA("IntValue")) and v.Name:lower():find("oxygen", 1, true) then
+			if v.Name:lower():find("max", 1, true) then
+				max = v.Value
+			else
+				cur = cur or v.Value
+			end
+		end
+	end
+	if cur then
+		if max and max > 0 then
+			return math.clamp(cur / max * 100, 0, 100)
+		end
+		if cur <= 1 then
+			return cur * 100
+		end
+		return math.clamp(cur, 0, 100)
+	end
+	return nil
+end
+
+local oxyGui, oxyGuiTry = nil, 0
+local function findOxygenGui()
+	local pg = localPG()
+	if not pg then
+		return nil
+	end
+	for _, d in ipairs(pg:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			local n = d.Name:lower()
+			if n:find("oxygen", 1, true) or n:find("breath", 1, true) then
+				local cands = { d }
+				for _, c in ipairs(d:GetDescendants()) do
+					cands[#cands + 1] = c
+				end
+				for _, c in ipairs(cands) do
+					if c:IsA("GuiObject") then
+						local cn = c.Name:lower()
+						if
+							(c:IsA("TextLabel") or cn:find("fill", 1, true) or cn:find("bar", 1, true) or cn:find("progress", 1, true))
+							and percentFromGui(c)
+						then
+							return c
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function readOxygen()
+	local lp = game:GetService("Players").LocalPlayer
+	local char = lp.Character
+	-- 1) path typed in the menu
+	if cfg.oxygenPath and cfg.oxygenPath ~= "" then
+		local o = resolvePath(cfg.oxygenPath)
+		local p = o and percentFromGui(o)
+		if p then
+			return p, "path: " .. cfg.oxygenPath
+		end
+	end
+	-- 2) attributes and Value objects
+	for _, inst in ipairs({ lp, char, char and char:FindFirstChildOfClass("Humanoid") }) do
+		local p = inst and fromAttributes(inst)
+		if p then
+			return p, "attribute on " .. inst.Name
+		end
+	end
+	for _, root in ipairs({ char, lp:FindFirstChild("leaderstats"), lp:FindFirstChild("Data") }) do
+		local p = root and fromValues(root)
+		if p then
+			return p, "value in " .. root.Name
+		end
+	end
+	-- 3) an oxygen bar / label in the UI (cached)
+	if not (oxyGui and oxyGui.Parent) and os.clock() - oxyGuiTry > 2 then
+		oxyGuiTry = os.clock()
+		oxyGui = findOxygenGui()
+	end
+	if oxyGui and oxyGui.Parent then
+		local p = percentFromGui(oxyGui)
+		if p then
+			return p, "ui: " .. oxyGui.Name
+		end
+	end
+	return nil, "not found"
+end
+
+local RunService = game:GetService("RunService")
+local BUBBLE_SPEED = 20
+local bubbleAuto, bubbleToken = false, nil
+local bubbleCache, bubbleCacheAt, bubbleVisited = {}, 0, {}
+
+local function objPos(o)
+	if o:IsA("Model") then
+		return o:GetPivot().Position
+	end
+	return o.Position
+end
+
+local function bubbleCandidates(hrp, char)
+	if os.clock() - bubbleCacheAt > 1 then
+		bubbleCacheAt = os.clock()
+		bubbleCache = {}
+		local pat = norm(cfg.bubbleName)
+		if pat == "" then
+			pat = "bubble"
+		end
+		local folder = workspace:FindFirstChild("EnvironmentOxygenBubbles")
+		local pool = folder and folder:GetChildren() or workspace:GetDescendants()
+		for _, d in ipairs(pool) do
+			if
+				(d:IsA("BasePart") or d:IsA("Model"))
+				and not d:IsDescendantOf(char)
+				and (folder ~= nil or norm(d.Name):find(pat, 1, true))
+			then
+				bubbleCache[#bubbleCache + 1] = d
+			end
+		end
+	end
+	local out = {}
+	for _, d in ipairs(bubbleCache) do
+		if d.Parent and (not bubbleVisited[d] or os.clock() - bubbleVisited[d] > 8) then
+			local p = objPos(d)
+			out[#out + 1] = { inst = d, pos = p, dist = (p - hrp.Position).Magnitude }
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.dist < b.dist
+	end)
+	return out
+end
+
+local function bubbleLoop(token)
+	local warnedOxy = false
+	while bubbleAuto and bubbleToken == token do
+		local char = game:GetService("Players").LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then
+			task.wait(1)
+		else
+			local oxy = readOxygen()
+			local thr = tonumber(cfg.bubbleBelow) or 80
+			if oxy == nil and not warnedOxy then
+				warnedOxy = true
+				noti("Auto Bubble", "Oxygen not found - collecting bubbles without a limit", 5)
+			end
+			if oxy and oxy >= thr then
+				task.wait(0.5) -- oxygen is above the limit: stay where you are
+			else
+			local target = bubbleCandidates(hrp, char)[1]
+			if not target then
+				task.wait(0.5)
+			else
+				local started = os.clock()
+				local reached = false
+				while bubbleAuto and bubbleToken == token and os.clock() - started < 20 do
+					local inst = target.inst
+					if not inst.Parent or not hrp.Parent or hum.Health <= 0 then
+						break
+					end
+					local dir = objPos(inst) - hrp.Position
+					if dir.Magnitude < 3 then
+						reached = true
+						break
+					end
+					if cfg.bubbleMode == "Tween" then
+						local dt = RunService.Heartbeat:Wait()
+						local step = math.min(BUBBLE_SPEED * dt, dir.Magnitude)
+						hrp.CFrame = hrp.CFrame + dir.Unit * step
+						hrp.AssemblyLinearVelocity = Vector3.zero
+					else
+						hum:MoveTo(objPos(inst))
+						task.wait(0.25)
+					end
+				end
+				-- stay inside the bubble for a while (oxygen refills while you are in it)
+				local stay = tonumber(cfg.bubbleStay) or 0
+				local t0 = os.clock()
+				while
+					reached
+					and stay > 0
+					and bubbleAuto
+					and bubbleToken == token
+					and os.clock() - t0 < stay
+					and target.inst.Parent
+					and hum.Health > 0
+				do
+					local o = readOxygen()
+					if o and o >= 99 then
+						break -- oxygen is full
+					end
+					task.wait(0.25)
+				end
+				bubbleVisited[target.inst] = os.clock()
+			end
+			end
+		end
 	end
 end
 
@@ -539,7 +910,7 @@ end)
 S1.CreateLabel({ Title = "Leave empty for default (no challenges)" })
 S1.CreateDropdown({
 	Title = "Map",
-	List = { "None", "Grasslands", "Desert", "Swamp", "Jungle", "Frost Forest", "Volcano", "Atlantis" },
+	List = { "None", "Grasslands", "Desert", "Swamp", "Jungle", "Frost Forest", "Volcano", "Atlantis", "Crystal Cavern" },
 	Default = cfg.map,
 }, function(v)
 	cfg.map = v
@@ -621,6 +992,7 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 end)
 
 local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
+
 local SF = PageF.CreateSection("AUTO CARD")
 SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appear", Default = false }, function(v)
 	cardAuto = v and true or false
@@ -636,8 +1008,16 @@ SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appe
 		end)
 	end
 end)
-SF.CreateBox({ Title = "Priority (comma separated, best first)", Default = cfg.cardPriority }, function(v)
-	cfg.cardPriority = type(v) == "string" and v or ""
+SF.CreateDropdown({ Title = "Prefer", List = { "Weapons first", "Cards first" }, Default = cfg.cardPrefer }, function(v)
+	cfg.cardPrefer = v
+	save()
+end)
+SF.CreateDropdown({ Title = "Weapons", List = WEAPONS, Multi = true, Search = true, Default = cfg.weaponsWanted }, function(sel)
+	cfg.weaponsWanted = toArray(WEAPONS, sel)
+	save()
+end)
+SF.CreateDropdown({ Title = "Cards", List = CARDS, Multi = true, Search = true, Default = cfg.cardsWanted }, function(sel)
+	cfg.cardsWanted = toArray(CARDS, sel)
 	save()
 end)
 SF.CreateDropdown({ Title = "If nothing matches", List = { "Pick first card", "Reroll", "Do nothing" }, Default = cfg.cardFallback }, function(v)
@@ -648,18 +1028,68 @@ SF.CreateSlider({ Title = "Max rerolls per offer", Min = 0, Max = 10, Default = 
 	cfg.cardMaxRerolls = v
 	save()
 end)
+SF.CreateToggle({ Title = "Auto Banish", Desc = "Removes cards from the Banish list", Default = cfg.cardBanish }, function(v)
+	cfg.cardBanish = v and true or false
+	save()
+end)
+SF.CreateDropdown({ Title = "Banish list", List = BANISH_ALL, Multi = true, Search = true, Default = cfg.banishList }, function(sel)
+	cfg.banishList = toArray(BANISH_ALL, sel)
+	save()
+end)
 SF.CreateButton({ Title = "Show cards on screen" }, function()
 	local cards = getCards()
 	if not cards then
-		UI.CreateNoti({ Title = "Cards", Desc = "No card offer on screen", ShowTime = 3 })
+		noti("Cards", "No card offer on screen", 3)
 		return
 	end
 	local names = {}
 	for _, c in ipairs(cards) do
 		names[#names + 1] = c.name
 	end
-	UI.CreateNoti({ Title = "Cards (" .. #cards .. ")", Desc = table.concat(names, " | "), ShowTime = 6 })
+	noti("Cards (" .. #cards .. ")", table.concat(names, " | "), 6)
 end)
-SF.CreateLabel({ Title = "Names are matched by text, e.g. Shotgun, Damage" })
+SF.CreateLabel({ Title = "Weapons and cards are matched by their exact names." })
+SF.CreateLabel({ Title = "Auto Banish: if no banish is left, the card may be picked instead." })
 
-UI.CreateNoti({ Title = "Final Swarm v8", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local SB = PageF.CreateSection("AUTO BUBBLE")
+SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", Default = false }, function(v)
+	bubbleAuto = v and true or false
+	UI.CreateNoti({ Title = "Auto Bubble", Desc = bubbleAuto and ("ON - " .. tostring(cfg.bubbleMode)) or "OFF", ShowTime = 2 })
+	if bubbleAuto then
+		local token = {}
+		bubbleToken = token
+		task.spawn(bubbleLoop, token)
+	end
+end)
+SB.CreateSlider({ Title = "Take bubble below (%)", Min = 0, Max = 100, Default = tonumber(cfg.bubbleBelow) or 80 }, function(v)
+	cfg.bubbleBelow = v
+	save()
+end)
+SB.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.bubbleMode }, function(v)
+	cfg.bubbleMode = v
+	save()
+end)
+SB.CreateBox({ Title = "Bubble name contains", Default = cfg.bubbleName }, function(v)
+	cfg.bubbleName = (type(v) == "string" and v ~= "") and v or "bubble"
+	save()
+end)
+SB.CreateSlider({ Title = "Stay in bubble (seconds)", Min = 0, Max = 30, Default = tonumber(cfg.bubbleStay) or 5 }, function(v)
+	cfg.bubbleStay = v
+	save()
+end)
+SB.CreateBox({ Title = "Oxygen UI path (optional)", Default = cfg.oxygenPath }, function(v)
+	cfg.oxygenPath = type(v) == "string" and v or ""
+	save()
+end)
+SB.CreateButton({ Title = "Show oxygen reading" }, function()
+	local p, src = readOxygen()
+	if p then
+		noti("Oxygen", string.format("%d%% (%s)", math.floor(p + 0.5), src), 5)
+	else
+		noti("Oxygen", "Not found. Go underwater and try again, or set the UI path.", 5)
+	end
+end)
+SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
+SB.CreateLabel({ Title = "Safe: walks normally. Tween: moves at speed 20." })
+
+UI.CreateNoti({ Title = "Final Swarm v11", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
