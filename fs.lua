@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v16)
+	Final Swarm - Lobby (v17)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -61,6 +61,7 @@ local cfg = {
 	pressMethod = "",
 	afterMatch = "Nothing",
 	afterDelay = 3,
+	autoExecute = false,
 	oxygenPath = "",
 }
 pcall(function()
@@ -1163,10 +1164,12 @@ local function walkLoop(token)
 end
 
 ---------------------------------------------------------------- after match (replay / lobby)
--- Acts only when a ScreenGui shows a Replay-like button AND a Lobby-like button at the same time
--- (the result screen), so it can never press "Lobby" in the middle of a match.
+-- Flow described for the game:
+--   win  : "VICTORY" -> "click screen to continue" -> wave/items -> buttons Lobby / Again / Stats
+--   lose : "DEFEAT" + "Give Up" button            -> wave/items -> buttons Lobby / Again / Stats
+-- It never presses "Lobby" mid-match: the result buttons must be on screen together (Again + Lobby).
 local function buttonLabel(b)
-	if b:IsA("TextButton") and b.Text ~= "" then
+	if (b:IsA("TextButton") or b:IsA("TextLabel")) and b.Text ~= "" then
 		return cleanText(b.Text)
 	end
 	for _, c in ipairs(b:GetDescendants()) do
@@ -1177,33 +1180,79 @@ local function buttonLabel(b)
 	return ""
 end
 
-local function resultButtons()
+-- returns kind ("result" | "defeat" | "continue") and the elements found, or nil
+local function scanEnd()
 	local pg = localPG()
 	if not pg then
 		return nil
 	end
+	local defeatE, continueE
 	for _, gui in ipairs(pg:GetChildren()) do
 		if gui:IsA("ScreenGui") and gui.Enabled then
-			local replay, lobby
+			local again, lobby, giveUp, defeat, cont
 			for _, d in ipairs(gui:GetDescendants()) do
-				if d:IsA("GuiButton") and isShown(d) then
+				if (d:IsA("GuiButton") or d:IsA("TextLabel")) and isShown(d) then
 					local n = norm(buttonLabel(d))
-					if not replay and (n:find("replay", 1, true) or n:find("playagain", 1, true) or n:find("retry", 1, true)) then
-						replay = d
-					elseif not lobby and n:find("lobby", 1, true) then
-						lobby = d
+					if n ~= "" then
+						if d:IsA("GuiButton") then
+							if not again and (n:find("again", 1, true) or n:find("replay", 1, true) or n:find("retry", 1, true)) then
+								again = d
+							elseif not lobby and n:find("lobby", 1, true) then
+								lobby = d
+							elseif not giveUp and n:find("giveup", 1, true) then
+								giveUp = d
+							end
+						end
+						if not defeat and n:find("defeat", 1, true) then
+							defeat = d
+						end
+						if not cont and n:find("click", 1, true) and n:find("continue", 1, true) then
+							cont = d
+						end
 					end
 				end
 			end
-			if replay and lobby then
-				return replay, lobby
+			if again and lobby then
+				return "result", { again = again, lobby = lobby }
+			end
+			if defeat and giveUp and not defeatE then
+				defeatE = { giveUp = giveUp }
+			end
+			if cont and not continueE then
+				continueE = { cont = cont }
 			end
 		end
+	end
+	if defeatE then
+		return "defeat", defeatE
+	end
+	if continueE then
+		return "continue", continueE
 	end
 	return nil
 end
 
-local afterSeenAt, afterDoneAt, afterFailed = nil, 0, false
+-- a plain click in the middle of the screen ("click screen to continue")
+local function clickScreen()
+	local okS, vim = pcall(function()
+		return game:GetService("VirtualInputManager")
+	end)
+	if not okS or not vim then
+		return false
+	end
+	local cam = workspace.CurrentCamera
+	local size = cam and cam.ViewportSize or Vector2.new(800, 600)
+	local x = size.X * (0.45 + math.random() * 0.1)
+	local y = size.Y * (0.45 + math.random() * 0.1)
+	pcall(function()
+		vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		task.wait(0.05)
+		vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+	end)
+	return true
+end
+
+local afterSeenAt, afterDoneAt, afterFailed, lastContinue, gaveUpAt = nil, 0, false, 0, 0
 local function afterStep()
 	if cfg.afterMatch == "Nothing" then
 		afterSeenAt = nil
@@ -1212,26 +1261,44 @@ local function afterStep()
 	if os.clock() - afterDoneAt < 20 then
 		return
 	end
-	local replay, lobby = resultButtons()
-	if not replay then
+	local kind, e = scanEnd()
+	if kind == "result" then
+		afterSeenAt = afterSeenAt or os.clock()
+		if os.clock() - afterSeenAt < (tonumber(cfg.afterDelay) or 3) then
+			return
+		end
+		local btn = (cfg.afterMatch == "Replay") and e.again or e.lobby
+		local label = buttonLabel(btn)
+		local ok, how = pressVerified(btn, function()
+			return not btn.Parent or not isShown(btn)
+		end)
+		if ok then
+			afterDoneAt = os.clock()
+			noti("After match", cfg.afterMatch .. ": " .. label .. " (" .. how .. ")", 4)
+		elseif not afterFailed then
+			afterFailed = true
+			noti("After match", "Could not press: " .. label, 4)
+		end
+	elseif kind == "defeat" then
+		afterSeenAt = nil
+		if os.clock() - gaveUpAt > 5 then
+			gaveUpAt = os.clock()
+			local btn = e.giveUp
+			local ok, how = pressVerified(btn, function()
+				return not btn.Parent or not isShown(btn)
+			end)
+			if ok then
+				noti("After match", "Defeat: Give Up (" .. how .. ")", 3)
+			end
+		end
+	elseif kind == "continue" then
+		afterSeenAt = nil
+		if os.clock() - lastContinue > 1.2 then
+			lastContinue = os.clock()
+			clickScreen()
+		end
+	else
 		afterSeenAt, afterFailed = nil, false
-		return
-	end
-	afterSeenAt = afterSeenAt or os.clock()
-	if os.clock() - afterSeenAt < (tonumber(cfg.afterDelay) or 3) then
-		return
-	end
-	local btn = (cfg.afterMatch == "Replay") and replay or lobby
-	local label = buttonLabel(btn)
-	local ok, how = pressVerified(btn, function()
-		return not btn.Parent or not isShown(btn)
-	end)
-	if ok then
-		afterDoneAt = os.clock()
-		noti("After match", cfg.afterMatch .. ": " .. label .. " (" .. how .. ")", 4)
-	elseif not afterFailed then
-		afterFailed = true
-		noti("After match", "Could not press: " .. label, 4)
 	end
 end
 
@@ -1241,9 +1308,53 @@ getgenv().__LV_AFTER = afterToken
 task.spawn(function()
 	while getgenv().__LV_AFTER == afterToken do
 		pcall(afterStep)
-		task.wait(1.5)
+		task.wait(0.8)
 	end
 end)
+
+---------------------------------------------------------------- auto execute (re-run after teleport)
+local LOADER_URL = "https://levianstore.my.id/loader.lua"
+local LINK = "https://discord.gg/Mc2YpMT2cF"
+
+local function queueReload()
+	if getgenv().__LV_QUEUED then
+		return true -- already queued in this session
+	end
+	local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+	if not q then
+		return false
+	end
+	local code = ([[
+if not game:IsLoaded() then game.Loaded:Wait() end
+local ok, saved = pcall(function() return game:GetService("HttpService"):JSONDecode(readfile(%q)) end)
+if ok and type(saved) == "table" and saved.autoExecute == false then return end
+loadstring(game:HttpGet(%q))()
+]]):format(FILE, LOADER_URL)
+	local ok = pcall(q, code)
+	if ok then
+		getgenv().__LV_QUEUED = true
+	end
+	return ok
+end
+
+local tpConn
+local function setAutoExecute(on)
+	cfg.autoExecute = on and true or false
+	save()
+	if cfg.autoExecute then
+		local ok = queueReload()
+		if not ok then
+			UI.CreateNoti({ Title = "Auto Execute", Desc = "queue_on_teleport is not supported by this executor", ShowTime = 5 })
+		end
+		if not tpConn then
+			tpConn = game:GetService("Players").LocalPlayer.OnTeleport:Connect(function()
+				if cfg.autoExecute then
+					queueReload()
+				end
+			end)
+		end
+	end
+end
 
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
@@ -1373,6 +1484,31 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 			end
 		end)
 	end
+end)
+
+local PageA = Main.CreatePage({ Page_Name = "About Us", Page_Title = "About Us" })
+local SAb = PageA.CreateSection("About Us")
+SAb.CreateLabel({ Title = "Levian Store" })
+-- centre the label (the library labels are left-aligned by default)
+pcall(function()
+	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
+		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		if g then
+			for _, d in ipairs(g:GetDescendants()) do
+				if d:IsA("TextLabel") and d.Text == "Levian Store" then
+					d.TextXAlignment = Enum.TextXAlignment.Center
+					d.TextSize = 22
+					d.Font = Enum.Font.GothamBold
+					d.TextColor3 = Color3.fromRGB(255, 204, 0)
+				end
+			end
+		end
+	end
+end)
+SAb.CreateButton({ Title = "Copy Link" }, function()
+	local copy = setclipboard or toclipboard or (syn and syn.write_clipboard)
+	local ok = copy and pcall(copy, LINK)
+	UI.CreateNoti({ Title = "Levian Store", Desc = ok and "Link copied" or LINK, ShowTime = 4 })
 end)
 
 local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
@@ -1530,13 +1666,26 @@ SA.CreateSlider({ Title = "Delay (seconds)", Min = 0, Max = 30, Default = tonumb
 	save()
 end)
 SA.CreateButton({ Title = "Show result buttons" }, function()
-	local replay, lobby = resultButtons()
-	if replay then
-		noti("Result screen", "Replay: " .. buttonLabel(replay) .. " | Lobby: " .. buttonLabel(lobby), 6)
+	local kind, e = scanEnd()
+	if kind == "result" then
+		noti("Result screen", "Again: " .. buttonLabel(e.again) .. " | Lobby: " .. buttonLabel(e.lobby), 6)
+	elseif kind == "defeat" then
+		noti("Result screen", "Defeat screen: " .. buttonLabel(e.giveUp), 4)
+	elseif kind == "continue" then
+		noti("Result screen", "Click-to-continue screen", 4)
 	else
 		noti("Result screen", "Not on screen", 3)
 	end
 end)
-SA.CreateLabel({ Title = "Acts only when the Replay and Lobby buttons are both on screen." })
+SA.CreateLabel({ Title = "Skips Victory/Defeat screens, then presses Again or Lobby." })
+SA.CreateLabel({ Title = "Keep the menu hidden: it clicks the middle of the screen." })
 
-UI.CreateNoti({ Title = "Final Swarm v16", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local PageS = Main.CreatePage({ Page_Name = "Settings", Page_Title = "Settings" })
+local SS = PageS.CreateSection("SETTINGS")
+SS.CreateToggle({ Title = "Auto Execute", Desc = "Reloads this script after changing map (lobby <-> match)", Default = cfg.autoExecute }, function(v)
+	setAutoExecute(v)
+	UI.CreateNoti({ Title = "Auto Execute", Desc = v and "ON" or "OFF", ShowTime = 2 })
+end)
+SS.CreateLabel({ Title = "No need to enable auto execute in your executor." })
+
+UI.CreateNoti({ Title = "Final Swarm v17", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
