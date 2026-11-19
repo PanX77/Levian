@@ -1,3 +1,5 @@
+-- I making script for fun, Respect me Dont steal it😄
+-- discord.gg/Mc2YpMT2cF
 --[[
 	LevianUI - library UI sederhana untuk Roblox (tanpa akses web)
 	Isi: Window, Page(tab), Section, Toggle(saklar), Button, Label, Slider,
