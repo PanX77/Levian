@@ -1,5 +1,5 @@
 --[[
-	Final Swarm - Lobby (v17)
+	Levian Hub - Final Swarm (v19)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -62,6 +62,7 @@ local cfg = {
 	afterMatch = "Nothing",
 	afterDelay = 3,
 	autoExecute = false,
+	key = "",
 	oxygenPath = "",
 }
 pcall(function()
@@ -135,6 +136,115 @@ if not UI then
 	end)
 	return
 end
+
+---------------------------------------------------------------- key system (Panda Auth)
+-- Nothing below this block runs until a valid key was entered (or the saved key is still valid).
+local DISCORD = "https://discord.gg/Mc2YpMT2cF"
+local PUSL
+do
+	local okLib, lib = pcall(function()
+		return loadstring(game:HttpGet("https://secure.pandauth.com/pv4/lib"))()
+	end)
+	if okLib and type(lib) == "table" and type(lib.configure) == "function" then
+		PUSL = lib
+		pcall(PUSL.configure, { serviceId = "levianhub" })
+	end
+end
+
+local function copyText(t)
+	local f = setclipboard or toclipboard or (syn and syn.write_clipboard)
+	return f and pcall(f, t) or false
+end
+local function keyNoti(title, desc, t)
+	pcall(function()
+		UI.CreateNoti({ Title = title, Desc = desc, ShowTime = t or 4 })
+	end)
+end
+
+-- returns true + result table, or false + a short message
+local function checkKey(key)
+	if not PUSL then
+		return false, "Key service unavailable"
+	end
+	key = tostring(key or ""):gsub("%s+", "")
+	if key == "" then
+		return false, "Enter your key first"
+	end
+	local ok, res = pcall(PUSL.validate, key)
+	if not ok or type(res) ~= "table" then
+		return false, "Could not reach the key service"
+	end
+	if res.success then
+		return true, res
+	end
+	return false, tostring(res.message or res.error or "Invalid or expired key")
+end
+
+local authed = false
+if tostring(cfg.key or "") ~= "" then
+	local okSaved = checkKey(cfg.key)
+	authed = okSaved and true or false
+end
+
+if not authed then
+	local KeyMain = UI.CreateMain({ Title = "Levian Hub", Desc = " - Key System" })
+	-- older library versions: remove the close (x) button and use an X logo
+	pcall(function()
+		for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
+			local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+			if g then
+				for _, d in ipairs(g:GetDescendants()) do
+					if d:IsA("TextButton") and d.Text == "x" then
+						d:Destroy()
+					end
+				end
+			end
+			local t = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
+			local b = t and t:FindFirstChildWhichIsA("TextButton")
+			if b then
+				b.Text = "X"
+			end
+		end
+	end)
+	local KP = KeyMain.CreatePage({ Page_Name = "Key", Page_Title = "Key System" })
+	local KS = KP.CreateSection("KEY")
+	local typed = tostring(cfg.key or "")
+	KS.CreateBox({ Title = "Key", Default = typed }, function(v)
+		typed = tostring(v or "")
+	end)
+	KS.CreateButton({ Title = "Get Key" }, function()
+		local okUrl, url = pcall(function()
+			return PUSL.getKeyUrl()
+		end)
+		if not okUrl or type(url) ~= "string" or url == "" then
+			keyNoti("Key", "Key service unavailable", 4)
+			return
+		end
+		keyNoti("Get Key", copyText(url) and "Link copied - open it in your browser" or url, 6)
+	end)
+	KS.CreateButton({ Title = "Check Key" }, function()
+		local ok, res = checkKey(typed)
+		if ok then
+			cfg.key = (typed:gsub("%s+", ""))
+			save()
+			keyNoti("Key", res.isPremium and "Authenticated (Premium)" or "Authenticated", 3)
+			authed = true
+		else
+			keyNoti("Key", res, 4)
+		end
+	end)
+	KS.CreateButton({ Title = "Discord" }, function()
+		keyNoti("Discord", copyText(DISCORD) and "Link copied" or DISCORD, 5)
+	end)
+	KS.CreateLabel({ Title = "Get a key, paste it above, then press Check Key." })
+
+	while not authed do
+		task.wait(0.3)
+	end
+	pcall(KeyMain.Destroy)
+	task.wait(0.2)
+end
+
 
 ---------------------------------------------------------------- remotes
 local function getRemotes()
@@ -604,6 +714,39 @@ local function pressVerified(btn, check)
 end
 
 -- manual players click anywhere to skip the card-reveal animation: click the (non-button) title area
+-- wait until every card stopped moving (the reveal animation is over); returns false if the offer vanished
+local function cardsLayout()
+	local cards = getCards()
+	if not cards then
+		return nil
+	end
+	local parts = {}
+	for _, c in ipairs(cards) do
+		local p, sz = c.btn.AbsolutePosition, c.btn.AbsoluteSize
+		parts[#parts + 1] = string.format("%d,%d,%d,%d", p.X, p.Y, sz.X, sz.Y)
+	end
+	return table.concat(parts, "|")
+end
+local function waitSettled(maxWait)
+	local t0, last, stable = os.clock(), nil, 0
+	while os.clock() - t0 < maxWait do
+		local lay = cardsLayout()
+		if not lay then
+			return false
+		end
+		if lay == last then
+			stable += 1
+			if stable >= 3 then
+				return true
+			end
+		else
+			stable, last = 0, lay
+		end
+		task.wait(0.05)
+	end
+	return true
+end
+
 local function skipAnimation()
 	local up = cardUI()
 	local target = up and up:FindFirstChild("TitleFrame")
@@ -687,7 +830,7 @@ local function cardStep()
 	end
 	lastSig, lastAt = sig, os.clock()
 	skipAnimation()
-	task.wait(0.1)
+	waitSettled(3)
 	local cards = getCards()
 	if not cards then
 		return
@@ -1165,8 +1308,8 @@ end
 
 ---------------------------------------------------------------- after match (replay / lobby)
 -- Flow described for the game:
---   win  : "VICTORY" -> "click screen to continue" -> wave/items -> buttons Lobby / Again / Stats
---   lose : "DEFEAT" + "Give Up" button            -> wave/items -> buttons Lobby / Again / Stats
+--   win  : "VICTORY" -> "tap to continue..." -> items -> buttons Lobby / Again / Stats
+--   lose : "Give Up" button -> "DEFEAT" + "tap to continue..." -> items -> buttons Lobby / Again / Stats
 -- It never presses "Lobby" mid-match: the result buttons must be on screen together (Again + Lobby).
 local function buttonLabel(b)
 	if (b:IsA("TextButton") or b:IsA("TextLabel")) and b.Text ~= "" then
@@ -1206,7 +1349,7 @@ local function scanEnd()
 						if not defeat and n:find("defeat", 1, true) then
 							defeat = d
 						end
-						if not cont and n:find("click", 1, true) and n:find("continue", 1, true) then
+						if not cont and (n:find("tap", 1, true) or n:find("click", 1, true)) and n:find("continue", 1, true) then
 							cont = d
 						end
 					end
@@ -1356,8 +1499,81 @@ local function setAutoExecute(on)
 	end
 end
 
+---------------------------------------------------------------- configs (named snapshots of the menu)
+local CFGFILE = FOLDER .. "/" .. game:GetService("Players").LocalPlayer.Name .. "-finalswarm-configs.json"
+local store = { configs = {}, autoLoad = "" }
+pcall(function()
+	if isfile and isfile(CFGFILE) then
+		local d = HttpService:JSONDecode(readfile(CFGFILE))
+		if type(d) == "table" then
+			store.configs = type(d.configs) == "table" and d.configs or {}
+			store.autoLoad = type(d.autoLoad) == "string" and d.autoLoad or ""
+		end
+	end
+end)
+local function saveStore()
+	pcall(function()
+		if makefolder and not isfolder(FOLDER) then
+			makefolder(FOLDER)
+		end
+		writefile(CFGFILE, HttpService:JSONEncode(store))
+	end)
+end
+local function configNames()
+	local n = {}
+	for name in pairs(store.configs) do
+		n[#n + 1] = name
+	end
+	table.sort(n)
+	return n
+end
+local function cleanName(v)
+	v = tostring(v or ""):gsub("[^%w _%-]", "")
+	v = v:gsub("^%s+", ""):gsub("%s+$", "")
+	return v:sub(1, 30)
+end
+
+-- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
+local reg, tog = {}, {}
+local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false }
+local SKIP = { pressMethod = true, key = true }
+local function snapshot()
+	local copy = {}
+	for k, v in pairs(cfg) do
+		if not SKIP[k] then
+			copy[k] = v
+		end
+	end
+	local snap = { cfg = copy, on = on }
+	return HttpService:JSONDecode(HttpService:JSONEncode(snap)) -- deep copy
+end
+-- put a saved config into cfg AND into the menu controls (their callbacks apply it)
+local function applyConfig(name)
+	local snap = store.configs[name]
+	if type(snap) ~= "table" then
+		return false
+	end
+	for k, v in pairs(snap.cfg or {}) do
+		cfg[k] = v
+	end
+	for k, v in pairs(snap.cfg or {}) do
+		local c = reg[k]
+		if c then
+			pcall(c.SetValue, v)
+		end
+	end
+	for k, v in pairs(snap.on or {}) do
+		local c = tog[k]
+		if c then
+			pcall(c.SetValue, v and true or false)
+		end
+	end
+	save()
+	return true
+end
+
 ---------------------------------------------------------------- UI
-local Main = UI.CreateMain({ Title = "Final Swarm", Desc = " - Lobby" })
+local Main = UI.CreateMain({ Title = "Levian Hub", Desc = " - Final Swarm" })
 -- remove the close (x) button and use an X logo, in case the library on the server is an older version
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
@@ -1376,18 +1592,43 @@ pcall(function()
 		end
 	end
 end)
+local PageA = Main.CreatePage({ Page_Name = "About Us", Page_Title = "About Us" })
+local SAb = PageA.CreateSection("About Us")
+SAb.CreateLabel({ Title = "Levian Hub" })
+-- centre the label (the library labels are left-aligned by default)
+pcall(function()
+	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
+		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		if g then
+			for _, d in ipairs(g:GetDescendants()) do
+				if d:IsA("TextLabel") and d.Text == "Levian Hub" then
+					d.TextXAlignment = Enum.TextXAlignment.Center
+					d.TextSize = 22
+					d.Font = Enum.Font.GothamBold
+					d.TextColor3 = Color3.fromRGB(255, 204, 0)
+				end
+			end
+		end
+	end
+end)
+SAb.CreateButton({ Title = "Copy Link" }, function()
+	local copy = setclipboard or toclipboard or (syn and syn.write_clipboard)
+	local ok = copy and pcall(copy, LINK)
+	UI.CreateNoti({ Title = "Levian Hub", Desc = ok and "Link copied" or LINK, ShowTime = 4 })
+end)
+
 local Page = Main.CreatePage({ Page_Name = "Lobby", Page_Title = "Lobby" })
 
 local S1 = Page.CreateSection("CAMPAIGN")
-S1.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.mode }, function(v)
+reg.mode = S1.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.mode }, function(v)
 	cfg.mode = v
 	save()
 end)
-S1.CreateDropdown({ Title = "Difficulty", List = { "Normal", "Hard", "Nightmare" }, Default = cfg.difficulty }, function(v)
+reg.difficulty = S1.CreateDropdown({ Title = "Difficulty", List = { "Normal", "Hard", "Nightmare" }, Default = cfg.difficulty }, function(v)
 	cfg.difficulty = v
 	save()
 end)
-S1.CreateDropdown({
+reg.challenges = S1.CreateDropdown({
 	Title = "Challenge",
 	List = CH_NAMES,
 	Multi = true,
@@ -1403,7 +1644,7 @@ S1.CreateDropdown({
 	save()
 end)
 S1.CreateLabel({ Title = "Leave empty for default (no challenges)" })
-S1.CreateDropdown({
+reg.map = S1.CreateDropdown({
 	Title = "Map",
 	List = { "None", "Grasslands", "Desert", "Swamp", "Jungle", "Frost Forest", "Volcano", "Atlantis", "Crystal Cavern" },
 	Default = cfg.map,
@@ -1413,15 +1654,15 @@ S1.CreateDropdown({
 end)
 
 local SR = Page.CreateSection("RAID")
-SR.CreateDropdown({ Title = "Raid", List = RAID_NAMES, Default = cfg.raid }, function(v)
+reg.raid = SR.CreateDropdown({ Title = "Raid", List = RAID_NAMES, Default = cfg.raid }, function(v)
 	cfg.raid = v
 	save()
 end)
-SR.CreateDropdown({ Title = "Difficulty", List = { "Normal", "Hard", "Nightmare" }, Default = cfg.raidDifficulty }, function(v)
+reg.raidDifficulty = SR.CreateDropdown({ Title = "Difficulty", List = { "Normal", "Hard", "Nightmare" }, Default = cfg.raidDifficulty }, function(v)
 	cfg.raidDifficulty = v
 	save()
 end)
-SR.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.raidMode }, function(v)
+reg.raidMode = SR.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.raidMode }, function(v)
 	cfg.raidMode = v
 	save()
 end)
@@ -1441,11 +1682,11 @@ pcall(function()
 		end
 	end
 end)
-SD.CreateDropdown({ Title = "Floor", List = floorNames, Default = tostring(cfg.dungeonFloor) }, function(v)
+reg.dungeonFloor = SD.CreateDropdown({ Title = "Floor", List = floorNames, Default = tostring(cfg.dungeonFloor) }, function(v)
 	cfg.dungeonFloor = v
 	save()
 end)
-SD.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.dungeonMode }, function(v)
+reg.dungeonMode = SD.CreateDropdown({ Title = "Mode", List = { "Solo", "Duo", "Trio", "Squad" }, Default = cfg.dungeonMode }, function(v)
 	cfg.dungeonMode = v
 	save()
 end)
@@ -1472,8 +1713,9 @@ S2.CreateButton({ Title = "Leave Queue" }, function()
 end)
 
 local auto = false
-S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minutes after a success", Default = false }, function(v)
+tog.autoJoin = S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minutes after a success", Default = false }, function(v)
 	auto = v and true or false
+	on.autoJoin = auto
 	UI.CreateNoti({ Title = "Auto Join", Desc = auto and "ON" or "OFF", ShowTime = 2 })
 	if auto then
 		task.spawn(function()
@@ -1486,36 +1728,12 @@ S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s; waits 2 minute
 	end
 end)
 
-local PageA = Main.CreatePage({ Page_Name = "About Us", Page_Title = "About Us" })
-local SAb = PageA.CreateSection("About Us")
-SAb.CreateLabel({ Title = "Levian Store" })
--- centre the label (the library labels are left-aligned by default)
-pcall(function()
-	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
-		if g then
-			for _, d in ipairs(g:GetDescendants()) do
-				if d:IsA("TextLabel") and d.Text == "Levian Store" then
-					d.TextXAlignment = Enum.TextXAlignment.Center
-					d.TextSize = 22
-					d.Font = Enum.Font.GothamBold
-					d.TextColor3 = Color3.fromRGB(255, 204, 0)
-				end
-			end
-		end
-	end
-end)
-SAb.CreateButton({ Title = "Copy Link" }, function()
-	local copy = setclipboard or toclipboard or (syn and syn.write_clipboard)
-	local ok = copy and pcall(copy, LINK)
-	UI.CreateNoti({ Title = "Levian Store", Desc = ok and "Link copied" or LINK, ShowTime = 4 })
-end)
-
 local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
 
 local SF = PageF.CreateSection("AUTO CARD")
-SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appear", Default = false }, function(v)
+tog.autoCard = SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appear", Default = false }, function(v)
 	cardAuto = v and true or false
+	on.autoCard = cardAuto
 	UI.CreateNoti({ Title = "Auto Card", Desc = cardAuto and "ON" or "OFF", ShowTime = 2 })
 	if cardAuto then
 		local token = {}
@@ -1528,31 +1746,31 @@ SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appe
 		end)
 	end
 end)
-SF.CreateDropdown({ Title = "Prefer", List = { "Weapons first", "Cards first" }, Default = cfg.cardPrefer }, function(v)
+reg.cardPrefer = SF.CreateDropdown({ Title = "Prefer", List = { "Weapons first", "Cards first" }, Default = cfg.cardPrefer }, function(v)
 	cfg.cardPrefer = v
 	save()
 end)
-SF.CreateDropdown({ Title = "Weapons", List = WEAPONS, Multi = true, Search = true, Default = cfg.weaponsWanted }, function(sel)
+reg.weaponsWanted = SF.CreateDropdown({ Title = "Weapons", List = WEAPONS, Multi = true, Search = true, Default = cfg.weaponsWanted }, function(sel)
 	cfg.weaponsWanted = toArray(WEAPONS, sel)
 	save()
 end)
-SF.CreateDropdown({ Title = "Cards", List = CARDS, Multi = true, Search = true, Default = cfg.cardsWanted }, function(sel)
+reg.cardsWanted = SF.CreateDropdown({ Title = "Cards", List = CARDS, Multi = true, Search = true, Default = cfg.cardsWanted }, function(sel)
 	cfg.cardsWanted = toArray(CARDS, sel)
 	save()
 end)
-SF.CreateDropdown({ Title = "If nothing matches", List = { "Pick first card", "Reroll", "Do nothing" }, Default = cfg.cardFallback }, function(v)
+reg.cardFallback = SF.CreateDropdown({ Title = "If nothing matches", List = { "Pick first card", "Reroll", "Do nothing" }, Default = cfg.cardFallback }, function(v)
 	cfg.cardFallback = v
 	save()
 end)
-SF.CreateSlider({ Title = "Max rerolls per offer", Min = 0, Max = 10, Default = tonumber(cfg.cardMaxRerolls) or 3 }, function(v)
+reg.cardMaxRerolls = SF.CreateSlider({ Title = "Max rerolls per offer", Min = 0, Max = 10, Default = tonumber(cfg.cardMaxRerolls) or 3 }, function(v)
 	cfg.cardMaxRerolls = v
 	save()
 end)
-SF.CreateToggle({ Title = "Auto Banish", Desc = "Removes cards from the Banish list", Default = cfg.cardBanish }, function(v)
+reg.cardBanish = SF.CreateToggle({ Title = "Auto Banish", Desc = "Removes cards from the Banish list", Default = cfg.cardBanish }, function(v)
 	cfg.cardBanish = v and true or false
 	save()
 end)
-SF.CreateDropdown({ Title = "Banish list", List = BANISH_ALL, Multi = true, Search = true, Default = cfg.banishList }, function(sel)
+reg.banishList = SF.CreateDropdown({ Title = "Banish list", List = BANISH_ALL, Multi = true, Search = true, Default = cfg.banishList }, function(sel)
 	cfg.banishList = toArray(BANISH_ALL, sel)
 	save()
 end)
@@ -1572,8 +1790,9 @@ SF.CreateLabel({ Title = "Weapons and cards are matched by their exact names." }
 SF.CreateLabel({ Title = "Auto Banish: if no banish is left, the card may be picked instead." })
 
 local SB = PageF.CreateSection("AUTO BUBBLE")
-SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", Default = false }, function(v)
+tog.autoBubble = SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", Default = false }, function(v)
 	bubbleAuto = v and true or false
+	on.autoBubble = bubbleAuto
 	if not bubbleAuto then
 		bubbleBusy = false
 	end
@@ -1584,19 +1803,19 @@ SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", D
 		task.spawn(bubbleLoop, token)
 	end
 end)
-SB.CreateSlider({ Title = "Take bubble below (%)", Min = 0, Max = 100, Default = tonumber(cfg.bubbleBelow) or 80 }, function(v)
+reg.bubbleBelow = SB.CreateSlider({ Title = "Take bubble below (%)", Min = 0, Max = 100, Default = tonumber(cfg.bubbleBelow) or 80 }, function(v)
 	cfg.bubbleBelow = v
 	save()
 end)
-SB.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.bubbleMode }, function(v)
+reg.bubbleMode = SB.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.bubbleMode }, function(v)
 	cfg.bubbleMode = v
 	save()
 end)
-SB.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.bubbleSpeed) or 20 }, function(v)
+reg.bubbleSpeed = SB.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.bubbleSpeed) or 20 }, function(v)
 	cfg.bubbleSpeed = v
 	save()
 end)
-SB.CreateBox({ Title = "Oxygen UI path (optional)", Default = cfg.oxygenPath }, function(v)
+reg.oxygenPath = SB.CreateBox({ Title = "Oxygen UI path (optional)", Default = cfg.oxygenPath }, function(v)
 	cfg.oxygenPath = type(v) == "string" and v or ""
 	save()
 end)
@@ -1611,8 +1830,9 @@ end)
 SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
 
 local SR = PageF.CreateSection("AUTO RIFT")
-SR.CreateToggle({ Title = "Auto Rift", Desc = "Moves to the nearest rift", Default = false }, function(v)
+tog.autoRift = SR.CreateToggle({ Title = "Auto Rift", Desc = "Moves to the nearest rift", Default = false }, function(v)
 	riftAuto = v and true or false
+	on.autoRift = riftAuto
 	UI.CreateNoti({ Title = "Auto Rift", Desc = riftAuto and ("ON - " .. tostring(cfg.riftMode)) or "OFF", ShowTime = 2 })
 	if riftAuto then
 		local token = {}
@@ -1622,27 +1842,28 @@ SR.CreateToggle({ Title = "Auto Rift", Desc = "Moves to the nearest rift", Defau
 		riftBusy = false
 	end
 end)
-SR.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.riftMode }, function(v)
+reg.riftMode = SR.CreateDropdown({ Title = "Mode", List = { "Safe", "Tween" }, Default = cfg.riftMode }, function(v)
 	cfg.riftMode = v
 	save()
 end)
-SR.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.riftSpeed) or 20 }, function(v)
+reg.riftSpeed = SR.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Default = tonumber(cfg.riftSpeed) or 20 }, function(v)
 	cfg.riftSpeed = v
 	save()
 end)
-SR.CreateToggle({ Title = "Stay at rift", Desc = "Stays next to the rift while it exists", Default = cfg.riftStay }, function(v)
+reg.riftStay = SR.CreateToggle({ Title = "Stay at rift", Desc = "Stays next to the rift while it exists", Default = cfg.riftStay }, function(v)
 	cfg.riftStay = v and true or false
 	save()
 end)
-SR.CreateDropdown({ Title = "Targets", List = { "Rift", "Crystal", "Circle" }, Multi = true, Default = cfg.riftTargets }, function(sel)
+reg.riftTargets = SR.CreateDropdown({ Title = "Targets", List = { "Rift", "Crystal", "Circle" }, Multi = true, Default = cfg.riftTargets }, function(sel)
 	cfg.riftTargets = toArray({ "Rift", "Crystal", "Circle" }, sel)
 	save()
 end)
 SR.CreateLabel({ Title = "Auto Bubble has priority when oxygen is low." })
 
 local SW = PageF.CreateSection("WALK AROUND")
-SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
+tog.walk = SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
 	walkAuto = v and true or false
+	on.walk = walkAuto
 	UI.CreateNoti({ Title = "Walk Around", Desc = walkAuto and "ON" or "OFF", ShowTime = 2 })
 	if walkAuto then
 		local token = {}
@@ -1650,18 +1871,18 @@ SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you
 		task.spawn(walkLoop, token)
 	end
 end)
-SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
+reg.walkRadius = SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
 	cfg.walkRadius = v
 	save()
 end)
 SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
 
 local SA = PageF.CreateSection("AFTER MATCH")
-SA.CreateDropdown({ Title = "When the match ends", List = { "Nothing", "Replay", "Lobby" }, Default = cfg.afterMatch }, function(v)
+reg.afterMatch = SA.CreateDropdown({ Title = "When the match ends", List = { "Nothing", "Replay", "Lobby" }, Default = cfg.afterMatch }, function(v)
 	cfg.afterMatch = v
 	save()
 end)
-SA.CreateSlider({ Title = "Delay (seconds)", Min = 0, Max = 30, Default = tonumber(cfg.afterDelay) or 3 }, function(v)
+reg.afterDelay = SA.CreateSlider({ Title = "Delay (seconds)", Min = 0, Max = 30, Default = tonumber(cfg.afterDelay) or 3 }, function(v)
 	cfg.afterDelay = v
 	save()
 end)
@@ -1682,10 +1903,108 @@ SA.CreateLabel({ Title = "Keep the menu hidden: it clicks the middle of the scre
 
 local PageS = Main.CreatePage({ Page_Name = "Settings", Page_Title = "Settings" })
 local SS = PageS.CreateSection("SETTINGS")
-SS.CreateToggle({ Title = "Auto Execute", Desc = "Reloads this script after changing map (lobby <-> match)", Default = cfg.autoExecute }, function(v)
+reg.autoExecute = SS.CreateToggle({ Title = "Auto Execute", Desc = "Reloads this script after changing map (lobby <-> match)", Default = cfg.autoExecute }, function(v)
 	setAutoExecute(v)
 	UI.CreateNoti({ Title = "Auto Execute", Desc = v and "ON" or "OFF", ShowTime = 2 })
 end)
 SS.CreateLabel({ Title = "No need to enable auto execute in your executor." })
 
-UI.CreateNoti({ Title = "Final Swarm v17", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+local SC = PageS.CreateSection("CONFIG")
+local cfgNameInput, cfgSelected = "", ""
+local cfgList, autoList
+local function withNone(names)
+	local l = { "None" }
+	for _, n in ipairs(names) do
+		l[#l + 1] = n
+	end
+	return l
+end
+local function refreshLists()
+	local names = configNames()
+	pcall(cfgList.Refresh, names)
+	pcall(autoList.Refresh, withNone(names))
+end
+SC.CreateBox({ Title = "Config name", Default = "" }, function(v)
+	cfgNameInput = cleanName(v)
+end)
+SC.CreateButton({ Title = "Save" }, function()
+	if cfgNameInput == "" then
+		noti("Config", "Type a config name first", 3)
+		return
+	end
+	store.configs[cfgNameInput] = snapshot()
+	saveStore()
+	refreshLists()
+	noti("Config", "Saved: " .. cfgNameInput, 3)
+end)
+cfgList = SC.CreateDropdown({ Title = "Config", List = configNames() }, function(v)
+	cfgSelected = tostring(v or "")
+end)
+SC.CreateButton({ Title = "Load" }, function()
+	if cfgSelected == "" or not store.configs[cfgSelected] then
+		noti("Config", "Select a saved config first", 3)
+		return
+	end
+	applyConfig(cfgSelected)
+	noti("Config", "Loaded: " .. cfgSelected, 3)
+end)
+SC.CreateButton({ Title = "Delete" }, function()
+	if cfgSelected == "" or not store.configs[cfgSelected] then
+		noti("Config", "Select a saved config first", 3)
+		return
+	end
+	local gone = cfgSelected
+	store.configs[gone] = nil
+	if store.autoLoad == gone then
+		store.autoLoad = ""
+		pcall(autoList.SetValue, "None")
+	end
+	saveStore()
+	cfgSelected = ""
+	pcall(cfgList.SetValue, nil)
+	refreshLists()
+	noti("Config", "Deleted: " .. gone, 3)
+end)
+autoList = SC.CreateDropdown({
+	Title = "Auto Load",
+	List = withNone(configNames()),
+	Default = (store.configs[store.autoLoad] and store.autoLoad) or "None",
+}, function(v)
+	store.autoLoad = (v == "None") and "" or tostring(v)
+	saveStore()
+end)
+SC.CreateLabel({ Title = "Save stores the whole menu, including the toggles that are on." })
+
+-- open the Lobby tab first (About Us is the first tab in the list)
+pcall(function()
+	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
+		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		if g then
+			for _, d in ipairs(g:GetDescendants()) do
+				if d:IsA("TextButton") and d.Text == "Lobby" then
+					local ok = pcall(function()
+						for _, c in ipairs(getconnections(d.MouseButton1Click)) do
+							c:Fire()
+						end
+					end)
+					if not ok and firesignal then
+						pcall(firesignal, d.MouseButton1Click)
+					end
+					return
+				end
+			end
+		end
+	end
+end)
+
+-- auto load the chosen config once the menu is built
+local autoName = store.autoLoad
+if autoName ~= "" and store.configs[autoName] then
+	task.delay(1.5, function()
+		if applyConfig(autoName) then
+			UI.CreateNoti({ Title = "Config", Desc = "Auto loaded: " .. autoName, ShowTime = 3 })
+		end
+	end)
+end
+
+UI.CreateNoti({ Title = "Final Swarm v19", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
