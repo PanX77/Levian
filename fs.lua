@@ -1,4 +1,5 @@
--- I makin
+-- I making script for fun, Respect me Dont steal it😄
+-- discord.gg/Mc2YpMT2cF
 --[[
 	Levian Hub - Final Swarm
 	Call order recorded from the game's own menu:
