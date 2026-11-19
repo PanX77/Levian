@@ -1,8 +1,6 @@
--- Banana Cat Premium.
--- By DevAurora Code
--- https://discord.gg/pU9ckzwsut
-
--- [PATCH] Blokir semua request ke domain banana-hub.xyz (config/webhook relay/data server)
+-- I making script for fun, Respect me Dont steal it😄
+-- discord.gg/Mc2YpMT2cF
+-- more info for this script not mine, i little make change fixing bug code or error
 do
 	local genv = getgenv()
 	local fake = { Success = false, StatusCode = 403, StatusMessage = "blocked", Headers = {}, Body = '{"data":[]}' }
