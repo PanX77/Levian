@@ -1,3 +1,5 @@
+-- I making script for fun, Respect me Dont steal it😄
+-- 
 local base = "https://levianstore.my.id/"
 local games = {
 	[2753915549] = "bf.lua", -- Blox Fruits Sea 1
@@ -6,11 +8,11 @@ local games = {
 	[99521272836282] = "fs.lua", -- final swarm
 	[79787558257549] = "fs.lua" -- final swarm
   
-	-- [ID_GAME_BARU] = "game2.lua",
+	-- [ID_GAME_BARU] = "namagame.lua",
 }
 local file = games[game.PlaceId]
 if file then
 	loadstring(game:HttpGet(base .. file))()
 else
-	warn("Game ini belum didukung: " .. tostring(game.PlaceId))
+	warn("Game not supported yet: " .. tostring(game.PlaceId))
 end
