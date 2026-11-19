@@ -1,5 +1,6 @@
+-- I makin
 --[[
-	Levian Hub - Final Swarm (v19)
+	Levian Hub - Final Swarm
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -112,8 +113,6 @@ end
 local function loadUI()
 	local urls = {
 		"https://levianstore.my.id/LevianUI.lua",
-		"https://levianstore.my.id/BananaUI.lua", -- old file name, fallback until LevianUI.lua is uploaded
-		"https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua",
 	}
 	for _, u in ipairs(urls) do
 		local ok, lib = pcall(function()
