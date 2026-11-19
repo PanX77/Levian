@@ -1,5 +1,6 @@
 -- I making script for fun, Respect me Dont steal it😄
--- 
+-- discord.gg/Mc2YpMT2cF
+
 local base = "https://levianstore.my.id/"
 local games = {
 	[2753915549] = "bf.lua", -- Blox Fruits Sea 1
