@@ -416,7 +416,7 @@ local function findToken()
 end
 
 ---------------------------------------------------------------- AUTO FARM (solver minesweeper)
-local F = { Run = false, Busy = false, Guess = false, Flagging = true, FlagRange = 12, Delay = 0.15, failed = {} }
+local F = { Run = false, Busy = false, Guess = false, Human = false, Flagging = true, FlagRange = 12, Delay = 0.15, failed = {} }
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 local BROWN = { Color3.new(0.803922, 0.556863, 0.392157), Color3.new(0.705882, 0.490196, 0.345098) }
 
@@ -624,7 +624,22 @@ local function bfs(B, from, goalFn)
 	return nil
 end
 
-local function moveTo(cell)
+-- jeda "berpikir" ala pemain (hanya mode Seperti pemain); kadang lompat di tempat
+local function think(a, b)
+	if not F.Human then
+		return
+	end
+	task.wait(a + math.random() * (b - a))
+	if math.random() < 0.06 then
+		local char = LP.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.Jump = true
+		end
+	end
+end
+
+local function moveTo(cell, straight)
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -632,11 +647,20 @@ local function moveTo(cell)
 		return false
 	end
 	local tx, tz = cell.part.Position.X, cell.part.Position.Z
+	local thr = 1.2
+	if F.Human then
+		-- sedikit meleset dari tengah (maks 0.5 stud), tetap jauh dari tepi kotak
+		tx += math.random() - 0.5
+		tz += math.random() - 0.5
+		if straight then
+			thr = 2.2 -- jalan lurus: lanjut ke kotak berikut tanpa berhenti di tengah
+		end
+	end
 	local t0 = os.clock()
 	while F.Run and os.clock() - t0 < 4 do
 		hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
 		local dx, dz = hrp.Position.X - tx, hrp.Position.Z - tz
-		if math.sqrt(dx * dx + dz * dz) < 1.2 then
+		if math.sqrt(dx * dx + dz * dz) < thr then
 			return true
 		end
 		task.wait(0.08)
@@ -644,31 +668,60 @@ local function moveTo(cell)
 	return false
 end
 
--- jalan lewat cell terbuka sampai ada tetangga (4 arah) yang memenuhi pred, lalu injak tetangga itu
+-- jalan lewat cell terbuka (4 arah) ke tetangga yang memenuhi pred, lalu injak tetangga itu.
+-- Robot: ambil yang terdekat. Seperti pemain: pilih acak di antara 3 terdekat.
 local function stepToward(B, cur, pred)
-	local target
-	local path = bfs(B, cur, function(c)
+	local prev, dist, order = { [cur.key] = false }, { [cur.key] = 0 }, { cur }
+	local head = 1
+	while head <= #order do
+		local c = order[head]
+		head += 1
+		for _, d in ipairs(DIRS) do
+			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
+			if n and prev[n.key] == nil and revealed(n) then
+				prev[n.key] = c
+				dist[n.key] = dist[c.key] + 1
+				order[#order + 1] = n
+			end
+		end
+	end
+	local cands = {}
+	for _, c in ipairs(order) do
 		for _, d in ipairs(DIRS) do
 			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
 			if n and n.state == "unk" and pred(n) then
-				target = n
-				return true
+				cands[#cands + 1] = { c = c, n = n }
+				break
 			end
 		end
-		return false
-	end)
-	if not path then
+	end
+	if #cands == 0 then
 		return false
 	end
+	local pick = cands[1]
+	if F.Human then
+		pick = cands[math.random(1, math.min(#cands, 3))]
+	end
+	local path, w = {}, pick.c
+	while w do
+		table.insert(path, 1, w)
+		w = prev[w.key]
+	end
 	for i = 2, #path do
-		if not F.Run or not moveTo(path[i]) then
+		if not F.Run then
+			return false
+		end
+		local c0, p0 = path[i], path[i - 1]
+		local nxt = path[i + 1] or pick.n
+		local straight = (nxt.x - c0.x == c0.x - p0.x) and (nxt.z - c0.z == c0.z - p0.z)
+		if not moveTo(c0, straight) then
 			return false
 		end
 	end
 	if not F.Run then
 		return false
 	end
-	moveTo(target)
+	moveTo(pick.n)
 	return true
 end
 
@@ -700,6 +753,7 @@ local function waitFlag(part, t)
 	return false
 end
 local function flagCell(B, cell, src)
+	think(0.3, 0.9)
 	fireFlag(cell.part)
 	if waitFlag(cell.part, 0.5) then
 		return true
@@ -832,6 +886,7 @@ local function farmLoop()
 			then
 				stepped, acted = true, true
 				task.wait(0.25)
+				think(0.2, 0.9)
 			end
 		end
 
@@ -1029,6 +1084,9 @@ FS.CreateToggle({ Title = "Auto Farm", Desc = "Tandai bom + jalan ke block aman"
 end)
 FS.CreateToggle({ Title = "Tebak kalau buntu", Desc = "Risiko menginjak bom", Default = false }, function(v)
 	F.Guess = v
+end)
+FS.CreateDropdown({ Title = "Gaya jalan", List = { "Robot", "Seperti pemain" }, Default = "Robot" }, function(v)
+	F.Human = (v == "Seperti pemain")
 end)
 FS.CreateToggle({ Title = "Tandai bom", Desc = "Butuh 1 bendera manual dulu (template)", Default = true }, function(v)
 	F.Flagging = v
