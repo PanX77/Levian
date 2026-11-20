@@ -34,7 +34,10 @@ local LP = Players.LocalPlayer
 ---------------------------------------------------------------- state
 local S = {
 	Spy = true,
-	OnlyStep = true,
+	OnlyStep = false, -- default mati: catat semua remote dulu sampai step terdeteksi benar
+	CellMode = true, -- deteksi step berdasarkan posisi grid (untuk lantai satu part)
+	CellSize = 4, -- ukuran 1 kotak (stud), sesuaikan dengan game
+	Touch = false, -- catat part yang disentuh avatar
 	Window = 1.5, -- detik setelah STEP yang masih dicatat
 	Incoming = false,
 	BlockFilter = "", -- kosong = semua part dianggap block
@@ -230,17 +233,17 @@ local function isBlock(part)
 	return part.Name:lower():find(f, 1, true) ~= nil or part:GetFullName():lower():find(f, 1, true) ~= nil
 end
 
-local function onStep(part)
+local function onStep(part, text)
 	lastStep = os.clock()
 	stepCount += 1
-	push(("[%s] STEP #%d %s"):format(os.date("%H:%M:%S"), stepCount, describe(part)))
-	setLabel(lblStep, "Block: " .. part.Name)
+	push(("[%s] STEP #%d %s"):format(os.date("%H:%M:%S"), stepCount, part and describe(part) or text))
+	setLabel(lblStep, part and ("Block: " .. part.Name) or text)
 	setLabel(lblCount, ("Step: %d | Remote tercatat: %d"):format(stepCount, remoteCount))
 end
 
 local rp = RaycastParams.new()
 rp.FilterType = Enum.RaycastFilterType.Exclude
-local lastChar
+local lastChar, lastCell
 RunService.Heartbeat:Connect(function()
 	local char = LP.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -259,7 +262,82 @@ RunService.Heartbeat:Connect(function()
 			onStep(part)
 		end
 	end
+	if S.CellMode then
+		local p = hrp.Position
+		local key = math.floor(p.X / S.CellSize) .. "," .. math.floor(p.Z / S.CellSize)
+		if key ~= lastCell then
+			lastCell = key
+			onStep(nil, ("CELL %s (lantai: %s)"):format(key, part and part.Name or "-"))
+		end
+	end
 end)
+
+---------------------------------------------------------------- touch, scan, dump
+local touchSeen = {}
+local function hookChar(char)
+	for _, p in ipairs(char:GetChildren()) do
+		if p:IsA("BasePart") then
+			p.Touched:Connect(function(o)
+				if not S.Touch or o:IsDescendantOf(char) then
+					return
+				end
+				if touchSeen[o] and os.clock() - touchSeen[o] < 1 then
+					return
+				end
+				touchSeen[o] = os.clock()
+				push(("[%s] TOUCH %s [%s] CanQuery=%s"):format(os.date("%H:%M:%S"), o:GetFullName(), o.ClassName, tostring(o.CanQuery)))
+			end)
+		end
+	end
+end
+if LP.Character then
+	hookChar(LP.Character)
+end
+LP.CharacterAdded:Connect(function(c)
+	task.wait(1)
+	hookChar(c)
+end)
+
+local function scan()
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return
+	end
+	local list = {}
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d:IsA("BasePart") and not d:IsDescendantOf(char) then
+			local dist = (d.Position - hrp.Position).Magnitude
+			if dist <= 30 then
+				list[#list + 1] = { d, dist }
+			end
+		end
+	end
+	table.sort(list, function(a, b)
+		return a[2] < b[2]
+	end)
+	push(("[%s] SCAN %d part dalam radius 30 stud (posisi avatar %.1f, %.1f, %.1f)"):format(
+		os.date("%H:%M:%S"), #list, hrp.Position.X, hrp.Position.Y, hrp.Position.Z
+	))
+	for i = 1, math.min(#list, 40) do
+		local d = list[i][1]
+		push(("  %.1f stud | %s | CanQuery=%s CanTouch=%s CanCollide=%s Transp=%.2f"):format(
+			list[i][2], describe(d), tostring(d.CanQuery), tostring(d.CanTouch), tostring(d.CanCollide), d.Transparency
+		))
+	end
+end
+
+local function dumpRemotes()
+	push(("[%s] DUMP REMOTE:"):format(os.date("%H:%M:%S")))
+	local n = 0
+	for _, d in ipairs(game:GetDescendants()) do
+		if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent") then
+			n += 1
+			push(("  [%s] %s"):format(d.ClassName, d:GetFullName()))
+		end
+	end
+	push(("  total: %d"):format(n))
+end
 
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Minesweeper", Desc = " - Minesweeper" })
@@ -269,8 +347,18 @@ local Sec = Page.CreateSection("Remote Spy")
 Sec.CreateToggle({ Title = "Aktifkan Spy", Desc = "Catat FireServer / InvokeServer", Default = true }, function(v)
 	S.Spy = v
 end)
-Sec.CreateToggle({ Title = "Hanya dekat step", Desc = "Catat remote hanya setelah melangkah ke block", Default = true }, function(v)
+Sec.CreateToggle({ Title = "Hanya dekat step", Desc = "Catat remote hanya setelah melangkah ke block", Default = false }, function(v)
 	S.OnlyStep = v
+end)
+Sec.CreateToggle({ Title = "Deteksi step per kotak", Desc = "Step = pindah kotak grid (untuk lantai 1 part)", Default = true }, function(v)
+	S.CellMode = v
+end)
+Sec.CreateSlider({ Title = "Ukuran kotak (stud)", Min = 1, Max = 20, Default = 4 }, function(v)
+	S.CellSize = v
+	lastCell = nil
+end)
+Sec.CreateToggle({ Title = "Catat sentuhan (TOUCH)", Desc = "Part yang disentuh avatar", Default = false }, function(v)
+	S.Touch = v
 end)
 Sec.CreateSlider({ Title = "Jendela waktu (detik)", Min = 0.1, Max = 5, Default = 1.5, Precise = true }, function(v)
 	S.Window = v
@@ -297,6 +385,10 @@ local Info = Page.CreateSection("Status")
 lblStep = Info.CreateLabel("Block: -")
 lblRemote = Info.CreateLabel("Remote terakhir: -")
 lblCount = Info.CreateLabel("Step: 0 | Remote tercatat: 0")
+
+local Tools = Page.CreateSection("Alat")
+Tools.CreateButton("Scan sekitar avatar", scan)
+Tools.CreateButton("Daftar semua remote", dumpRemotes)
 
 local Log = Page.CreateSection("Log")
 Log.CreateButton("Copy log", function()
