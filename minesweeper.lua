@@ -119,6 +119,9 @@ local function addLog(kind, remote, method, a)
 	if S.Ignore[name:lower()] then
 		return
 	end
+	if a.n >= 1 and a[1] == "härshkäle" then
+		return -- beacon milik game sendiri, bikin log berisik
+	end
 	if S.OnlyStep and (os.clock() - lastStep) > S.Window then
 		return
 	end
@@ -126,11 +129,18 @@ local function addLog(kind, remote, method, a)
 	for i = 1, a.n do
 		parts[i] = ser(a[i])
 	end
+	local mark = ""
+	for _, ps in ipairs(parts) do
+		if ps:find("%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d") then
+			mark = " *TOKEN-LIKE*"
+			break
+		end
+	end
 	remoteCount += 1
 	local line = ("[%s] +%.2fs %s %s (%s) args: %s"):format(
 		os.date("%H:%M:%S"),
 		os.clock() - lastStep,
-		kind,
+		kind .. mark,
 		path(remote),
 		method,
 		#parts > 0 and table.concat(parts, ", ") or "(kosong)"
@@ -158,8 +168,15 @@ if hookmetamethod and getnamecallmethod and newcclosure then
 				local a = table.pack(...)
 				local remote = self
 				if remote.Name == "PlaceFlag" then
+					local old = flagTemplate
 					flagTemplate = a
-					task.defer(setLabel, lblTpl, "Template flag: siap")
+					task.defer(function()
+						local tk = tostring(a[2])
+						if not old or tostring(old[2]) ~= tk then
+							push(("[%s] TOKEN PlaceFlag %s: %s"):format(os.date("%H:%M:%S"), old and "BERUBAH" or "pertama", tk))
+						end
+						setLabel(lblTpl, "Template flag: siap (token ..." .. tk:sub(-4) .. ")")
+					end)
 				end
 				task.defer(function()
 					local okC, isRemote = pcall(function()
@@ -351,6 +368,51 @@ local function dumpRemotes()
 		end
 	end
 	push(("  total: %d"):format(n))
+end
+
+-- cari di mana string token PlaceFlag tersimpan di sisi client (Value, atribut, teks, nama)
+local function findToken()
+	if not flagTemplate or type(flagTemplate[2]) ~= "string" then
+		push("CARI TOKEN: belum ada template (taruh 1 bendera manual dulu)")
+		return
+	end
+	local tk = flagTemplate[2]
+	push(("[%s] CARI TOKEN %s"):format(os.date("%H:%M:%S"), tk))
+	local found, n = 0, 0
+	local function hit(where)
+		found += 1
+		push("  ditemukan: " .. where)
+	end
+	for _, d in ipairs(game:GetDescendants()) do
+		n += 1
+		if n % 3000 == 0 then
+			task.wait()
+		end
+		pcall(function()
+			if d.Name:find(tk, 1, true) then
+				hit("nama " .. path(d))
+			end
+			if d:IsA("ValueBase") then
+				local v = d.Value
+				if type(v) == "string" and v:find(tk, 1, true) then
+					hit("Value " .. path(d))
+				end
+			elseif d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+				if d.Text:find(tk, 1, true) then
+					hit("Text " .. path(d))
+				end
+			end
+			for k, v in pairs(d:GetAttributes()) do
+				if type(v) == "string" and v:find(tk, 1, true) then
+					hit(("atribut %s @%s"):format(path(d), k))
+				end
+			end
+		end)
+	end
+	push(("  selesai: %d tempat dari %d instance"):format(found, n))
+	if found == 0 then
+		push("  tidak tersimpan di Value/atribut/teks/nama; mungkin dikirim lewat remote (nyalakan Catat remote masuk) atau dihitung di script client")
+	end
 end
 
 ---------------------------------------------------------------- AUTO FARM (solver minesweeper)
@@ -925,6 +987,7 @@ lblCount = Info.CreateLabel("Step: 0 | Remote tercatat: 0")
 local Tools = Page.CreateSection("Alat")
 Tools.CreateButton("Scan sekitar avatar", scan)
 Tools.CreateButton("Daftar semua remote", dumpRemotes)
+Tools.CreateButton("Cari asal token flag", findToken)
 
 local Log = Page.CreateSection("Log")
 Log.CreateButton("Copy log", function()
