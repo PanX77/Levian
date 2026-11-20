@@ -354,7 +354,7 @@ local function dumpRemotes()
 end
 
 ---------------------------------------------------------------- AUTO FARM (solver minesweeper)
-local F = { Run = false, Busy = false, Guess = false, Delay = 0.15, failed = {} }
+local F = { Run = false, Busy = false, Guess = false, Flagging = true, FlagRange = 12, Delay = 0.15, failed = {} }
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 local BROWN = { Color3.new(0.803922, 0.556863, 0.392157), Color3.new(0.705882, 0.490196, 0.345098) }
 
@@ -682,17 +682,33 @@ local function guessTarget(B, cons, reduce, mineK)
 	return best, bestp
 end
 
+-- bom terdekat (dalam jangkauan) yang belum ditandai
+local function pickMine(mineK, pos, maxDist)
+	local best, bd
+	for key, m in pairs(mineK) do
+		if not F.failed[key] and not flagged(m.cell.part) then
+			local dx, dz = m.cell.part.Position.X - pos.X, m.cell.part.Position.Z - pos.Z
+			local d = math.sqrt(dx * dx + dz * dz)
+			if d <= maxDist and (not bd or d < bd) then
+				best, bd = m, d
+			end
+		end
+	end
+	return best
+end
+
 local function farmLoop()
 	if F.Busy then
 		return
 	end
 	F.Busy, F.failed = true, {}
-	local notified = false
+	local notified, lastRevealed, tplSeen = false, 0, flagTemplate
 	while F.Run do
-		task.wait(F.Delay)
+		task.wait(F.Delay * (0.7 + math.random() * 0.6))
 		local char = LP.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
-		if not hum or hum.Health <= 0 then
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hum or not hrp or hum.Health <= 0 then
 			fstatus("menunggu respawn")
 			task.wait(1)
 			continue
@@ -703,29 +719,47 @@ local function farmLoop()
 			task.wait(1)
 			continue
 		end
+
+		-- game baru (jumlah cell terbuka turun) atau template baru: reset catatan flag gagal
+		local nRev = 0
+		for _, c in ipairs(B.list) do
+			if revealed(c) then
+				nRev += 1
+			end
+		end
+		if nRev < lastRevealed then
+			F.failed, notified = {}, false
+		end
+		lastRevealed = nRev
+		if tplSeen ~= flagTemplate then
+			tplSeen, F.failed = flagTemplate, {}
+		end
+
 		local cur = curCell(B)
 		if not cur or not revealed(cur) then
-			fstatus("berdiri di block yang sudah terbuka dulu")
+			fstatus("menunggu game mulai / belum di atas block terbuka")
 			task.wait(1)
 			continue
 		end
-		local mineK, safeK, cons, reduce = solve(B)
-		local did = false
 
-		if flagTemplate then
-			for key, m in pairs(mineK) do
-				if not F.Run then
-					break
-				end
-				if not F.failed[key] and not flagged(m.cell.part) then
-					fstatus("menandai bom " .. key)
-					if flagCell(B, m.cell, m.src) then
-						did = true
-					end
+		local mineK, safeK, cons, reduce = solve(B)
+		local canFlag = F.Flagging and flagTemplate ~= nil
+		local acted, stepped = false, false
+
+		-- 1) tandai SATU bom terdekat yang ada dalam jangkauan (seperti pemain biasa)
+		if canFlag then
+			local m = pickMine(mineK, hrp.Position, F.FlagRange)
+			if m then
+				fstatus("menandai bom " .. m.cell.key)
+				if flagCell(B, m.cell, m.src) then
+					acted = true
+				else
+					fstatus("flag gagal (template usang? taruh 1 bendera manual lagi)")
 				end
 			end
 		end
 
+		-- 2) jalan ke block aman terdekat
 		cur = curCell(B)
 		if F.Run and cur and revealed(cur) and next(safeK) then
 			fstatus("jalan ke block aman")
@@ -734,12 +768,28 @@ local function farmLoop()
 					return safeK[n.key] ~= nil
 				end)
 			then
-				did = true
+				stepped, acted = true, true
 				task.wait(0.25)
 			end
 		end
 
-		if F.Run and not did then
+		-- 3) tidak ada block aman lagi: tandai sisa bom (jalan dekat jika perlu)
+		if F.Run and not stepped and canFlag then
+			while F.Run do
+				local r = char:FindFirstChild("HumanoidRootPart")
+				local m = r and pickMine(mineK, r.Position, math.huge)
+				if not m then
+					break
+				end
+				fstatus("menandai sisa bom " .. m.cell.key)
+				if flagCell(B, m.cell, m.src) then
+					acted = true
+				end
+				task.wait(F.Delay)
+			end
+		end
+
+		if F.Run and not acted then
 			cur = curCell(B)
 			if F.Guess and cur and revealed(cur) then
 				local g, p = guessTarget(B, cons, reduce, mineK)
@@ -749,14 +799,14 @@ local function farmLoop()
 						return n == g
 					end)
 					task.wait(0.4)
-					did = true
+					acted = true
 				end
 			end
-			if not did then
-				fstatus(flagTemplate and "buntu / selesai: tidak ada langkah pasti" or "buntu (dan belum ada template flag)")
+			if not acted then
+				fstatus(flagTemplate and "buntu / selesai: tidak ada langkah pasti" or "buntu (belum ada template flag)")
 				if not notified then
 					notified = true
-					UI.CreateNoti({ Title = "Auto Farm", Desc = "Tidak ada langkah pasti. Cek board atau aktifkan tebak.", ShowTime = 4 })
+					UI.CreateNoti({ Title = "Auto Farm", Desc = "Tidak ada langkah pasti. Menunggu game berikutnya.", ShowTime = 4 })
 				end
 				task.wait(1)
 			end
@@ -916,6 +966,12 @@ FS.CreateToggle({ Title = "Auto Farm", Desc = "Tandai bom + jalan ke block aman"
 end)
 FS.CreateToggle({ Title = "Tebak kalau buntu", Desc = "Risiko menginjak bom", Default = false }, function(v)
 	F.Guess = v
+end)
+FS.CreateToggle({ Title = "Tandai bom", Desc = "Butuh 1 bendera manual dulu (template)", Default = true }, function(v)
+	F.Flagging = v
+end)
+FS.CreateSlider({ Title = "Jarak tandai bom (stud)", Min = 5, Max = 40, Default = 12 }, function(v)
+	F.FlagRange = v
 end)
 FS.CreateSlider({ Title = "Jeda loop (detik)", Min = 0.05, Max = 1, Default = 0.15, Precise = true }, function(v)
 	F.Delay = v
