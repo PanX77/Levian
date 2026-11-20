@@ -1,7 +1,5 @@
--- I making script for fun, Respect me Dont steal it😄
--- discord.gg/Mc2YpMT2cF
 --[[
-	Levian Hub - Final Swarm
+	Levian Hub - Final Swarm (v22)
 	Call order recorded from the game's own menu:
 	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
 	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
@@ -65,6 +63,11 @@ local cfg = {
 	afterDelay = 3,
 	autoExecute = false,
 	key = "",
+	autoMinimize = false,
+	flyMode = "Fly",
+	flyDistance = 30,
+	flyHeight = 25,
+	flySpeed = 30,
 	oxygenPath = "",
 }
 pcall(function()
@@ -114,6 +117,8 @@ end
 local function loadUI()
 	local urls = {
 		"https://levianstore.my.id/LevianUI.lua",
+		"https://levianstore.my.id/BananaUI.lua", -- old file name, fallback until LevianUI.lua is uploaded
+		"https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua",
 	}
 	for _, u in ipairs(urls) do
 		local ok, lib = pcall(function()
@@ -135,6 +140,44 @@ if not UI then
 		})
 	end)
 	return
+end
+
+-- logo of the floating button (also for older library versions that have no ApplyLogo)
+local LOGO_URL = "https://levianstore.my.id/levian_logo.png"
+local function applyLogoTo(b)
+	if not b or b:FindFirstChild("LevianLogo") then
+		return
+	end
+	if UI.ApplyLogo then
+		if UI.ApplyLogo(b) then
+			return
+		end
+	else
+		local ok = pcall(function()
+			local data = game:HttpGet(LOGO_URL)
+			if makefolder and isfolder and not isfolder("Levian Hub") then
+				makefolder("Levian Hub")
+			end
+			writefile("Levian Hub/logo.png", data)
+			local img = Instance.new("ImageLabel")
+			img.Name = "LevianLogo"
+			img.BackgroundTransparency = 1
+			img.Size = UDim2.new(1, 0, 1, 0)
+			img.Image = (getcustomasset or getsynasset)("Levian Hub/logo.png")
+			img.Parent = b
+			local c = Instance.new("UICorner")
+			c.CornerRadius = UDim.new(0, 20)
+			c.Parent = img
+			b.Text = ""
+			b.BackgroundTransparency = 1
+		end)
+		if ok then
+			return
+		end
+	end
+	if b.Text == "" or b.Text == "B" then
+		b.Text = "X"
+	end
 end
 
 ---------------------------------------------------------------- key system (Panda Auth)
@@ -202,7 +245,7 @@ if not authed then
 			local t = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
 			local b = t and t:FindFirstChildWhichIsA("TextButton")
 			if b then
-				b.Text = "X"
+				task.spawn(applyLogoTo, b)
 			end
 		end
 	end)
@@ -1167,6 +1210,7 @@ end
 -- With "Stay at rift" on it stays next to the rift while it exists. Auto Bubble has priority (oxygen).
 local riftAuto, riftToken = false, nil
 local riftBusy = false -- true while the rift loop is moving the character
+local flyBusy = false -- true while Auto Farm (fly) is moving the character
 local riftCache, riftCacheAt, riftVisited = {}, 0, {}
 
 local function riftCandidates(hrp, char)
@@ -1264,7 +1308,7 @@ end
 
 ---------------------------------------------------------------- walk around (in-match)
 -- Walks to random points around where you were when it was switched on (Roblox walking, Humanoid:MoveTo).
--- It pauses while Auto Bubble or Auto Rift is moving the character.
+-- It pauses while Auto Bubble, Auto Rift or Auto Farm is moving the character.
 local walkAuto, walkToken = false, nil
 local function groundAt(pos, char)
 	local params = RaycastParams.new()
@@ -1283,8 +1327,8 @@ local function walkLoop(token)
 		if not hrp or not hum or hum.Health <= 0 then
 			center = nil
 			task.wait(1)
-		elseif bubbleBusy or riftBusy then
-			center = nil -- take a new centre after the bubble/rift trip
+		elseif bubbleBusy or riftBusy or flyBusy then
+			center = nil -- take a new centre after the bubble/rift/fly
 			task.wait(0.3)
 		else
 			center = center or hrp.Position
@@ -1294,7 +1338,7 @@ local function walkLoop(token)
 			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
 			hum:MoveTo(target)
 			local t0 = os.clock()
-			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and os.clock() - t0 < 6 do
+			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and not flyBusy and os.clock() - t0 < 6 do
 				local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
 				if math.sqrt(dx * dx + dz * dz) < 3 then
 					break
@@ -1306,24 +1350,97 @@ local function walkLoop(token)
 	end
 end
 
+---------------------------------------------------------------- auto farm: fly in a circle (in-match)
+-- Flies around a circle. Centre = where you were when it was switched on,
+-- Distance = radius (studs), Height = height above the ground at the centre, Speed = studs per second.
+-- Auto Bubble and Auto Rift have priority (they take over, then the circle continues).
+local flyAuto, flyToken = false, nil
+local function flyLoop(token)
+	local center, ground, angle, cur
+	while flyAuto and flyToken == token do
+		local char = game:GetService("Players").LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then
+			center, ground, cur = nil, nil, nil
+			flyBusy = false
+			task.wait(1)
+		elseif bubbleBusy or riftBusy then
+			flyBusy = false
+			cur = nil -- take over from the real position after the trip
+			hum.PlatformStand = false
+			RunService.Heartbeat:Wait()
+		else
+			local r = math.clamp(tonumber(cfg.flyDistance) or 30, 1, 100)
+			local h = math.clamp(tonumber(cfg.flyHeight) or 25, 1, 100)
+			local sp = math.clamp(tonumber(cfg.flySpeed) or 30, 1, 100)
+			if not center then
+				center = hrp.Position
+				ground = groundAt(center, char)
+			end
+			local dt = RunService.Heartbeat:Wait()
+			flyBusy = true
+			angle = (angle or 0) + math.min(sp / r, 6) * dt -- angular speed so the linear speed is ~Speed
+			local target = Vector3.new(center.X + math.cos(angle) * r, ground + h, center.Z + math.sin(angle) * r)
+			cur = cur or hrp.Position
+			local delta = target - cur
+			local dist = delta.Magnitude
+			local step = math.max(sp * 2, 40) * dt -- catches up smoothly, never a teleport
+			cur = (dist <= step) and target or (cur + delta.Unit * step)
+			local tangent = Vector3.new(-math.sin(angle), 0, math.cos(angle))
+			hum.PlatformStand = true
+			hrp.CFrame = CFrame.lookAt(cur, cur + tangent)
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+	flyBusy = false
+	local char = game:GetService("Players").LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.PlatformStand = false
+	end
+end
+
 ---------------------------------------------------------------- after match (replay / lobby)
 -- Flow described for the game:
 --   win  : "VICTORY" -> "tap to continue..." -> items -> buttons Lobby / Again / Stats
 --   lose : "Give Up" button -> "DEFEAT" + "tap to continue..." -> items -> buttons Lobby / Again / Stats
 -- It never presses "Lobby" mid-match: the result buttons must be on screen together (Again + Lobby).
-local function buttonLabel(b)
-	if (b:IsA("TextButton") or b:IsA("TextLabel")) and b.Text ~= "" then
-		return cleanText(b.Text)
+-- text of a label, or of a small labelled button (a big container button returns "")
+local function buttonLabel(o)
+	if o:IsA("TextButton") or o:IsA("TextLabel") then
+		return cleanText(o.Text)
 	end
-	for _, c in ipairs(b:GetDescendants()) do
-		if (c:IsA("TextLabel") or c:IsA("TextButton")) and c.Text ~= "" then
-			return cleanText(c.Text)
+	if o:IsA("GuiButton") then
+		local parts, n = {}, 0
+		for _, c in ipairs(o:GetDescendants()) do
+			if (c:IsA("TextLabel") or c:IsA("TextButton")) and c.Text ~= "" then
+				n += 1
+				if n > 3 then
+					return ""
+				end
+				parts[#parts + 1] = cleanText(c.Text)
+			end
 		end
+		local joined = table.concat(parts, " ")
+		return #joined <= 30 and joined or ""
 	end
 	return ""
 end
 
--- returns kind ("result" | "defeat" | "continue") and the elements found, or nil
+local function preferButton(old, new)
+	if not old then
+		return new
+	end
+	if not old:IsA("GuiButton") and new:IsA("GuiButton") then
+		return new
+	end
+	return old
+end
+
+-- returns kind ("result" | "defeat" | "continue") and the elements found, or nil.
+-- Elements can be buttons OR plain text labels (the clickable part may be a separate transparent button).
 local function scanEnd()
 	local pg = localPG()
 	if not pg then
@@ -1332,25 +1449,23 @@ local function scanEnd()
 	local defeatE, continueE
 	for _, gui in ipairs(pg:GetChildren()) do
 		if gui:IsA("ScreenGui") and gui.Enabled then
-			local again, lobby, giveUp, defeat, cont
+			local again, lobby, giveUp, deathText, cont
 			for _, d in ipairs(gui:GetDescendants()) do
 				if (d:IsA("GuiButton") or d:IsA("TextLabel")) and isShown(d) then
 					local n = norm(buttonLabel(d))
 					if n ~= "" then
-						if d:IsA("GuiButton") then
-							if not again and (n:find("again", 1, true) or n:find("replay", 1, true) or n:find("retry", 1, true)) then
-								again = d
-							elseif not lobby and n:find("lobby", 1, true) then
-								lobby = d
-							elseif not giveUp and n:find("giveup", 1, true) then
-								giveUp = d
-							end
+						if n:find("again", 1, true) or n:find("replay", 1, true) or n:find("retry", 1, true) then
+							again = preferButton(again, d)
+						elseif n:find("lobby", 1, true) then
+							lobby = preferButton(lobby, d)
+						elseif n:find("giveup", 1, true) then
+							giveUp = preferButton(giveUp, d)
 						end
-						if not defeat and n:find("defeat", 1, true) then
-							defeat = d
+						if n:find("defeat", 1, true) or n:find("died", 1, true) or n:find("revive", 1, true) then
+							deathText = true
 						end
-						if not cont and (n:find("tap", 1, true) or n:find("click", 1, true)) and n:find("continue", 1, true) then
-							cont = d
+						if (n:find("tap", 1, true) or n:find("click", 1, true)) and n:find("continue", 1, true) then
+							cont = cont or d
 						end
 					end
 				end
@@ -1358,7 +1473,7 @@ local function scanEnd()
 			if again and lobby then
 				return "result", { again = again, lobby = lobby }
 			end
-			if defeat and giveUp and not defeatE then
+			if deathText and giveUp and not defeatE then
 				defeatE = { giveUp = giveUp }
 			end
 			if cont and not continueE then
@@ -1373,6 +1488,48 @@ local function scanEnd()
 		return "continue", continueE
 	end
 	return nil
+end
+
+-- real click on the element's position (works even when the clickable part is another, invisible object)
+local function pressByPosition(el, check)
+	local okS, vim = pcall(function()
+		return game:GetService("VirtualInputManager")
+	end)
+	if not okS or not vim then
+		return false
+	end
+	local x, y = centerOf(el)
+	for _, kind in ipairs({ "mouse", "touch" }) do
+		pcall(function()
+			if kind == "mouse" then
+				vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+				task.wait(0.05)
+				vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+			else
+				vim:SendTouchEvent(1, 0, x, y)
+				task.wait(0.05)
+				vim:SendTouchEvent(1, 2, x, y)
+			end
+		end)
+		for _ = 1, 20 do
+			task.wait(0.05)
+			if check() then
+				return true, "position " .. kind
+			end
+		end
+	end
+	return false
+end
+
+local function pressElement(el, check)
+	local btn = el:IsA("GuiButton") and el or el:FindFirstAncestorWhichIsA("GuiButton")
+	if btn then
+		local ok, how = pressVerified(btn, check)
+		if ok then
+			return true, how
+		end
+	end
+	return pressByPosition(el, check)
 end
 
 -- a plain click in the middle of the screen ("click screen to continue")
@@ -1395,10 +1552,16 @@ local function clickScreen()
 	return true
 end
 
-local afterSeenAt, afterDoneAt, afterFailed, lastContinue, gaveUpAt = nil, 0, false, 0, 0
+local afterSeenAt, afterDoneAt, afterFailed, lastContinue, gaveUpAt, afterStage = nil, 0, false, 0, 0, nil
+local function stage(name, msg)
+	if afterStage ~= name then
+		afterStage = name
+		noti("After match", msg, 3)
+	end
+end
 local function afterStep()
 	if cfg.afterMatch == "Nothing" then
-		afterSeenAt = nil
+		afterSeenAt, afterStage = nil, nil
 		return
 	end
 	if os.clock() - afterDoneAt < 20 then
@@ -1406,14 +1569,15 @@ local function afterStep()
 	end
 	local kind, e = scanEnd()
 	if kind == "result" then
+		stage("result", "Result screen found")
 		afterSeenAt = afterSeenAt or os.clock()
 		if os.clock() - afterSeenAt < (tonumber(cfg.afterDelay) or 3) then
 			return
 		end
-		local btn = (cfg.afterMatch == "Replay") and e.again or e.lobby
-		local label = buttonLabel(btn)
-		local ok, how = pressVerified(btn, function()
-			return not btn.Parent or not isShown(btn)
+		local el = (cfg.afterMatch == "Replay") and e.again or e.lobby
+		local label = buttonLabel(el)
+		local ok, how = pressElement(el, function()
+			return not el.Parent or not isShown(el)
 		end)
 		if ok then
 			afterDoneAt = os.clock()
@@ -1424,24 +1588,23 @@ local function afterStep()
 		end
 	elseif kind == "defeat" then
 		afterSeenAt = nil
+		stage("defeat", "You died - giving up")
 		if os.clock() - gaveUpAt > 5 then
 			gaveUpAt = os.clock()
-			local btn = e.giveUp
-			local ok, how = pressVerified(btn, function()
-				return not btn.Parent or not isShown(btn)
+			local el = e.giveUp
+			pressElement(el, function()
+				return not el.Parent or not isShown(el)
 			end)
-			if ok then
-				noti("After match", "Defeat: Give Up (" .. how .. ")", 3)
-			end
 		end
 	elseif kind == "continue" then
 		afterSeenAt = nil
+		stage("continue", "Tap to continue")
 		if os.clock() - lastContinue > 1.2 then
 			lastContinue = os.clock()
 			clickScreen()
 		end
 	else
-		afterSeenAt, afterFailed = nil, false
+		afterSeenAt, afterFailed, afterStage = nil, false, nil
 	end
 end
 
@@ -1535,7 +1698,7 @@ end
 
 -- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
 local reg, tog = {}, {}
-local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false }
+local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false, autoFarm = false }
 local SKIP = { pressMethod = true, key = true }
 local function snapshot()
 	local copy = {}
@@ -1588,7 +1751,7 @@ pcall(function()
 		local t = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
 		local b = t and t:FindFirstChildWhichIsA("TextButton")
 		if b then
-			b.Text = "X"
+			task.spawn(applyLogoTo, b)
 		end
 	end
 end)
@@ -1729,6 +1892,37 @@ tog.autoJoin = S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s;
 end)
 
 local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
+
+local SFl = PageF.CreateSection("AUTO FARM")
+tog.autoFarm = SFl.CreateToggle({ Title = "Auto Farm", Desc = "Flies in a circle around the map", Default = false }, function(v)
+	flyAuto = v and true or false
+	on.autoFarm = flyAuto
+	UI.CreateNoti({ Title = "Auto Farm", Desc = flyAuto and ("ON - " .. tostring(cfg.flyMode)) or "OFF", ShowTime = 2 })
+	if flyAuto then
+		local token = {}
+		flyToken = token
+		task.spawn(flyLoop, token)
+	end
+end)
+reg.flyMode = SFl.CreateDropdown({ Title = "Mode", List = { "Fly" }, Default = cfg.flyMode }, function(v)
+	cfg.flyMode = v
+	save()
+end)
+reg.flyDistance = SFl.CreateSlider({ Title = "Distance", Min = 1, Max = 100, Default = tonumber(cfg.flyDistance) or 30 }, function(v)
+	cfg.flyDistance = v
+	save()
+end)
+reg.flyHeight = SFl.CreateSlider({ Title = "Height", Min = 1, Max = 100, Default = tonumber(cfg.flyHeight) or 25 }, function(v)
+	cfg.flyHeight = v
+	save()
+end)
+reg.flySpeed = SFl.CreateSlider({ Title = "Speed", Min = 1, Max = 100, Default = tonumber(cfg.flySpeed) or 30 }, function(v)
+	cfg.flySpeed = v
+	save()
+end)
+SFl.CreateLabel({ Title = "Circles around where you switched it on." })
+SFl.CreateLabel({ Title = "Auto Bubble and Auto Rift take over when needed." })
+
 
 local SF = PageF.CreateSection("AUTO CARD")
 tog.autoCard = SF.CreateToggle({ Title = "Auto Card", Desc = "Picks a card when the offers appear", Default = false }, function(v)
@@ -1891,7 +2085,7 @@ SA.CreateButton({ Title = "Show result buttons" }, function()
 	if kind == "result" then
 		noti("Result screen", "Again: " .. buttonLabel(e.again) .. " | Lobby: " .. buttonLabel(e.lobby), 6)
 	elseif kind == "defeat" then
-		noti("Result screen", "Defeat screen: " .. buttonLabel(e.giveUp), 4)
+		noti("Result screen", "Death screen: " .. buttonLabel(e.giveUp), 4)
 	elseif kind == "continue" then
 		noti("Result screen", "Click-to-continue screen", 4)
 	else
@@ -1906,6 +2100,11 @@ local SS = PageS.CreateSection("SETTINGS")
 reg.autoExecute = SS.CreateToggle({ Title = "Auto Execute", Desc = "Reloads this script after changing map (lobby <-> match)", Default = cfg.autoExecute }, function(v)
 	setAutoExecute(v)
 	UI.CreateNoti({ Title = "Auto Execute", Desc = v and "ON" or "OFF", ShowTime = 2 })
+end)
+reg.autoMinimize = SS.CreateToggle({ Title = "Auto Minimize", Desc = "Hides the menu automatically when the script loads", Default = cfg.autoMinimize }, function(v)
+	cfg.autoMinimize = v and true or false
+	save()
+	UI.CreateNoti({ Title = "Auto Minimize", Desc = v and "ON - the menu hides on load" or "OFF", ShowTime = 2 })
 end)
 SS.CreateLabel({ Title = "No need to enable auto execute in your executor." })
 
@@ -2007,4 +2206,11 @@ if autoName ~= "" and store.configs[autoName] then
 	end)
 end
 
-UI.CreateNoti({ Title = "Final Swarm v19", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v22", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+
+-- Auto Minimize: hide the window like the "-" button does (the X logo stays and reopens it)
+if cfg.autoMinimize then
+	task.delay(2, function()
+		pcall(Main.SetVisible, false)
+	end)
+end

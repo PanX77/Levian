@@ -1,5 +1,3 @@
--- I making script for fun, Respect me Dont steal it😄
--- discord.gg/Mc2YpMT2cF
 --[[
 	LevianUI - library UI sederhana untuk Roblox (tanpa akses web)
 	Isi: Window, Page(tab), Section, Toggle(saklar), Button, Label, Slider,
@@ -35,6 +33,9 @@ local Theme = {
 }
 
 Library.GuiName = "Levian Hub GUI" -- nama ScreenGui utama (dipakai script untuk Toggle GUI)
+-- Logo of the floating button. Either an http(s) link to a PNG (downloaded once per run, needs
+-- writefile + getcustomasset) or a Roblox asset id such as "rbxassetid://123". Failure keeps the "X".
+Library.LogoUrl = "https://levianstore.my.id/levian_logo.png"
 
 ---------------------------------------------------------------- helper
 local function new(class, props, parent)
@@ -144,6 +145,56 @@ local function safeObj(t)
 			return function() end
 		end,
 	})
+end
+
+---------------------------------------------------------------- logo
+function Library.ApplyLogo(btn)
+	local src = Library.LogoUrl
+	if type(src) ~= "string" or src == "" or not btn or btn:FindFirstChild("LevianLogo") then
+		return false
+	end
+	local asset = src
+	if src:match("^https?://") then
+		local okF, data = pcall(function()
+			return game:HttpGet(src)
+		end)
+		if not okF or type(data) ~= "string" or #data < 100 then
+			return false
+		end
+		local okW = pcall(function()
+			if makefolder and isfolder and not isfolder("Levian Hub") then
+				makefolder("Levian Hub")
+			end
+			writefile("Levian Hub/logo.png", data)
+		end)
+		if not okW then
+			return false
+		end
+		local okA, a = pcall(function()
+			return (getcustomasset or getsynasset)("Levian Hub/logo.png")
+		end)
+		if not okA or not a then
+			return false
+		end
+		asset = a
+	end
+	if not btn.Parent then
+		return false
+	end
+	if btn:FindFirstChild("LevianLogo") then
+		return true -- another caller finished first
+	end
+	local img = new("ImageLabel", {
+		Name = "LevianLogo",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Image = asset,
+		ScaleType = Enum.ScaleType.Stretch,
+	}, btn)
+	corner(img, 20)
+	btn.Text = ""
+	btn.BackgroundTransparency = 1
+	return true
 end
 
 ---------------------------------------------------------------- notifikasi
@@ -336,6 +387,9 @@ function Library.CreateMain(...)
 	}, tgui)
 	corner(fab, 20)
 	makeDraggable(fab, fab)
+	task.spawn(function()
+		Library.ApplyLogo(fab)
+	end)
 	local function setVisible(v)
 		getgenv().UIToggled = v
 		win.Visible = v
