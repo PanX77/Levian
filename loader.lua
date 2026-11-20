@@ -9,7 +9,7 @@ local games = {
 	[99521272836282] = "fs.lua", -- final swarm
 	[79787558257549] = "fs.lua", -- final swarm
 	[72858262610964] = "tabsim.lua", -- Tab Simulator
-	[] = "minesweeper.lua", -- Minesweeper
+	[7871169780] = "minesweeper.lua", -- Minesweeper
   
 	-- [ID_GAME_BARU] = "namagame.lua",
 }
