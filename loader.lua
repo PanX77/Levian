@@ -8,6 +8,7 @@ local games = {
 	[7449423635] = "bf.lua", -- Sea 3
 	[99521272836282] = "fs.lua", -- final swarm
 	[79787558257549] = "fs.lua" -- final swarm
+	[72858262610964] = "tabsim.lua" -- Tab Simulator 
   
 	-- [ID_GAME_BARU] = "namagame.lua",
 }
