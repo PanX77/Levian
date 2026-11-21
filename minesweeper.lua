@@ -488,7 +488,7 @@ local function moveTo(cell, straight)
 end
 
 -- jalan lewat cell terbuka (4 arah) ke tetangga yang memenuhi pred, lalu injak tetangga itu.
--- Robot: ambil yang terdekat. Seperti pemain: rute dan target diacak (5 terdekat).
+-- Selalu yang terdekat; jalur dan pilihan seri diacak di mode Seperti pemain.
 local function stepToward(B, cur, pred)
 	local prev, dist, order = { [cur.key] = false }, { [cur.key] = 0 }, { cur }
 	local head = 1
@@ -517,10 +517,14 @@ local function stepToward(B, cur, pred)
 	if #cands == 0 then
 		return false
 	end
-	local pick = cands[1]
-	if F.Human then
-		pick = cands[math.random(1, math.min(#cands, 5))]
+	-- selalu rute terdekat; kalau ada beberapa yang sama dekat, pilih acak (mode pemain)
+	local best, ties = dist[cands[1].c.key], {}
+	for _, cd in ipairs(cands) do
+		if dist[cd.c.key] == best then
+			ties[#ties + 1] = cd
+		end
 	end
+	local pick = F.Human and ties[math.random(1, #ties)] or ties[1]
 	local path, w = {}, pick.c
 	while w do
 		table.insert(path, 1, w)
@@ -719,10 +723,17 @@ local function farmLoop()
 		local canFlag = F.Flagging and flagTemplate ~= nil
 		local acted, stepped = false, false
 
-		-- 1) tandai SATU bom terdekat yang ada dalam jangkauan (seperti pemain biasa)
+		-- 1) selesaikan dulu semua bom di sekitar avatar (dalam jangkauan), terdekat lebih dulu
 		if canFlag then
-			local m = pickMine(mineK, hrp.Position, F.FlagRange)
-			if m then
+			for _ = 1, 8 do
+				if not F.Run then
+					break
+				end
+				local r = char:FindFirstChild("HumanoidRootPart")
+				local m = r and pickMine(mineK, r.Position, F.FlagRange)
+				if not m then
+					break
+				end
 				fstatus("menandai bom " .. m.cell.key)
 				if flagCell(B, m.cell, m.src) then
 					acted = true
