@@ -1,17 +1,12 @@
 --[[
 	Minesweeper | Levian Hub
-	Fitur 1: Remote Spy (log remote saat avatar berjalan ke block)
+	Auto Farm: solver minesweeper + tandai bom + jalan ke block aman.
 
-	Cara kerja:
-	  1. Setiap frame, script menembak raycast ke bawah dari HumanoidRootPart.
-	     Kalau part di bawah kaki berganti => dianggap "melangkah ke block" (STEP).
-	  2. Hook __namecall mencatat FireServer / InvokeServer (OUT).
-	     Opsional: catat juga OnClientEvent dari server (IN).
-	  3. Mode "Hanya dekat step": remote hanya dicatat dalam X detik setelah STEP,
-	     jadi log tidak penuh remote lain. Angka "+0.05s" = jarak waktu dari step.
-	  4. Kalau tidak ada remote OUT sama sekali saat melangkah, berarti server
-	     mendeteksi sendiri lewat Touched / posisi. Lihat info block di log
-	     (atribut, child, ClickDetector, TouchTransmitter).
+	- Bom tidak bisa dibaca dari client. Bot menyimpulkan dari angka yang sudah terbuka
+	  dan hanya bertindak pada yang PASTI.
+	- Avatar hanya lewat block yang sudah terbuka, lalu menginjak block yang pasti aman.
+	- Bendera: PlaceFlag butuh token yang berganti tiap sesi. Script mencoba mencarinya
+	  otomatis; kalau gagal, taruh 1 bendera manual dan script akan mempelajarinya.
 ]]
 
 ---------------------------------------------------------------- load UI
@@ -28,28 +23,27 @@ do
 end
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 
 ---------------------------------------------------------------- state
-local S = {
-	Spy = true,
-	OnlyStep = false, -- default mati: catat semua remote dulu sampai step terdeteksi benar
-	CellMode = true, -- deteksi step berdasarkan posisi grid (untuk lantai satu part)
-	CellSize = 5, -- ukuran 1 kotak (stud); di game ini 5
-	Touch = false, -- catat part yang disentuh avatar
-	Window = 1.5, -- detik setelah STEP yang masih dicatat
-	Incoming = false,
-	BlockFilter = "", -- kosong = semua part dianggap block
-	Ignore = { patukka = true, afkevent = true }, -- [namaremote lowercase] = true
-	Max = 500,
+local F = {
+	Run = false,
+	Busy = false,
+	Guess = false, -- tebak kalau buntu (berisiko)
+	Human = true, -- gaya jalan: rute dan target diacak
+	Flagging = true,
+	AutoToken = true,
+	FlagRange = 12, -- stud
+	Delay = 0.15,
+	CellSize = 5, -- ukuran 1 kotak (stud)
+	failed = {},
+	autoTried = false,
 }
 local logs = {}
-local lastStep = -math.huge
-local lastBlock
-local stepCount, remoteCount = 0, 0
-local lblStep, lblRemote, lblCount, lblTpl, lblFarm
-local flagTemplate -- argumen PlaceFlag terakhir dari pemain (dipakai ulang oleh auto farm)
+local flagTemplate -- argumen PlaceFlag (part diganti saat dipakai)
+local lblTpl, lblFarm
+local seenTokens = {} -- string mirip token dari remote masuk
 
 ---------------------------------------------------------------- util
 -- game ini memberi nama instance dengan banyak newline; ganti jadi "¶" agar log rapi
@@ -107,98 +101,98 @@ end
 
 local function push(line)
 	logs[#logs + 1] = line
-	if #logs > S.Max then
+	if #logs > 500 then
 		table.remove(logs, 1)
 	end
-	print("[MS-Spy] " .. line)
+	print("[MS] " .. line)
 end
 
----------------------------------------------------------------- remote logging
-local function addLog(kind, remote, method, a)
-	local name = remote.Name
-	if S.Ignore[name:lower()] then
-		return
-	end
-	if a.n >= 1 and a[1] == "härshkäle" then
-		return -- beacon milik game sendiri, bikin log berisik
-	end
-	if S.OnlyStep and (os.clock() - lastStep) > S.Window then
-		return
-	end
-	local parts = {}
-	for i = 1, a.n do
-		parts[i] = ser(a[i])
-	end
-	local mark = ""
-	for _, ps in ipairs(parts) do
-		if ps:find("%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d") then
-			mark = " *TOKEN-LIKE*"
-			break
+---------------------------------------------------------------- token
+local function isTokenLike(v)
+	return type(v) == "string" and #v >= 20 and #v <= 40 and v:match("^%d+$") ~= nil
+end
+
+-- kumpulkan string angka panjang dari: remote masuk, Value/atribut, dan memori script client
+local function collectTokens()
+	local out, seen = {}, {}
+	local function add(v, where)
+		if isTokenLike(v) and not seen[v] then
+			seen[v] = true
+			out[#out + 1] = { v = v, where = where }
 		end
 	end
-	remoteCount += 1
-	local line = ("[%s] +%.2fs %s %s (%s) args: %s"):format(
-		os.date("%H:%M:%S"),
-		os.clock() - lastStep,
-		kind .. mark,
-		path(remote),
-		method,
-		#parts > 0 and table.concat(parts, ", ") or "(kosong)"
-	)
-	push(line)
-	setLabel(lblRemote, kind .. " " .. name)
-	setLabel(lblCount, ("Step: %d | Remote tercatat: %d"):format(stepCount, remoteCount))
-end
-
--- hook FireServer / InvokeServer
-local hooked = false
-if hookmetamethod and getnamecallmethod and newcclosure then
-	local old
-	old = hookmetamethod(
-		game,
-		"__namecall",
-		newcclosure(function(self, ...)
-			local m = getnamecallmethod()
-			if
-				S.Spy
-				and (m == "FireServer" or m == "InvokeServer" or m == "fireServer" or m == "invokeServer")
-				and not checkcaller()
-				and typeof(self) == "Instance"
-			then
-				local a = table.pack(...)
-				local remote = self
-				if remote.Name == "PlaceFlag" then
-					local old = flagTemplate
-					flagTemplate = a
-					task.defer(function()
-						local tk = tostring(a[2])
-						if not old or tostring(old[2]) ~= tk then
-							push(("[%s] TOKEN PlaceFlag %s: %s"):format(os.date("%H:%M:%S"), old and "BERUBAH" or "pertama", tk))
+	for v in pairs(seenTokens) do
+		add(v, "remote masuk")
+	end
+	local n = 0
+	for _, root in ipairs({ LP, ReplicatedStorage, workspace }) do
+		pcall(function()
+			for _, v in pairs(root:GetAttributes()) do
+				add(v, "atribut " .. path(root))
+			end
+			for _, d in ipairs(root:GetDescendants()) do
+				n += 1
+				if n % 3000 == 0 then
+					task.wait()
+				end
+				if d:IsA("ValueBase") then
+					local okv, val = pcall(function()
+						return d.Value
+					end)
+					if okv then
+						add(val, "Value " .. path(d))
+					end
+				end
+				for _, v in pairs(d:GetAttributes()) do
+					add(v, "atribut " .. path(d))
+				end
+			end
+		end)
+	end
+	if getgc then
+		pcall(function()
+			for i, o in ipairs(getgc(true)) do
+				if i % 2000 == 0 then
+					task.wait()
+				end
+				local t = type(o)
+				if t == "table" then
+					pcall(function()
+						for _, v in next, o do
+							add(v, "memori (tabel)")
 						end
-						setLabel(lblTpl, "Template flag: siap (token ..." .. tk:sub(-4) .. ")")
+					end)
+				elseif t == "function" and debug and debug.getupvalues then
+					pcall(function()
+						if islclosure and not islclosure(o) then
+							return
+						end
+						for _, uv in pairs(debug.getupvalues(o)) do
+							add(uv, "memori (upvalue)")
+						end
+						if debug.getconstants then
+							for _, c in pairs(debug.getconstants(o)) do
+								add(c, "memori (konstanta)")
+							end
+						end
 					end)
 				end
-				task.defer(function()
-					local okC, isRemote = pcall(function()
-						return remote:IsA("RemoteEvent")
-							or remote:IsA("RemoteFunction")
-							or remote:IsA("UnreliableRemoteEvent")
-					end)
-					if okC and isRemote then
-						addLog("OUT", remote, m, a)
-					end
-				end)
 			end
-			return old(self, ...)
 		end)
-	)
-	hooked = true
-else
-	warn("[MS-Spy] Executor tidak mendukung hookmetamethod, remote OUT tidak bisa dicatat")
+	end
+	return out
 end
 
--- OnClientEvent (server -> client)
+-- tangkap string mirip token yang dikirim server
 local watched = {}
+local function scanArgs(...)
+	for i = 1, select("#", ...) do
+		local v = select(i, ...)
+		if isTokenLike(v) then
+			seenTokens[v] = true
+		end
+	end
+end
 local function watch(inst)
 	if watched[inst] then
 		return
@@ -206,15 +200,10 @@ local function watch(inst)
 	local okC, isEvent = pcall(function()
 		return inst:IsA("RemoteEvent") or inst:IsA("UnreliableRemoteEvent")
 	end)
-	if not okC or not isEvent then
-		return
+	if okC and isEvent then
+		watched[inst] = true
+		inst.OnClientEvent:Connect(scanArgs)
 	end
-	watched[inst] = true
-	inst.OnClientEvent:Connect(function(...)
-		if S.Spy and S.Incoming then
-			addLog("IN ", inst, "OnClientEvent", table.pack(...))
-		end
-	end)
 end
 task.spawn(function()
 	for _, d in ipairs(game:GetDescendants()) do
@@ -223,201 +212,46 @@ task.spawn(function()
 end)
 game.DescendantAdded:Connect(watch)
 
----------------------------------------------------------------- deteksi step
-local function describe(part)
-	local t = {}
-	t[#t + 1] = ("%s [%s]"):format(path(part), part.ClassName)
-	local p, s = part.Position, part.Size
-	t[#t + 1] = ("pos=%.1f,%.1f,%.1f size=%.1f,%.1f,%.1f color=%s material=%s"):format(
-		p.X, p.Y, p.Z, s.X, s.Y, s.Z, tostring(part.Color), part.Material.Name
-	)
-	local attrs = {}
-	for k, v in pairs(part:GetAttributes()) do
-		attrs[#attrs + 1] = k .. "=" .. ser(v)
-	end
-	if #attrs > 0 then
-		t[#t + 1] = "attr: " .. table.concat(attrs, ", ")
-	end
-	local kids = {}
-	for _, c in ipairs(part:GetChildren()) do
-		local extra = ""
-		if c:IsA("ValueBase") then
-			extra = "=" .. tostring(c.Value)
-		end
-		kids[#kids + 1] = c.Name .. "<" .. c.ClassName .. ">" .. extra
-	end
-	if #kids > 0 then
-		t[#t + 1] = "child: " .. table.concat(kids, ", ")
-	end
-	return table.concat(t, " | ")
+-- belajar template dari bendera manual (cadangan kalau token otomatis tidak ketemu)
+local function setTemplate(a)
+	flagTemplate = a
+	setLabel(lblTpl, "Template flag: siap (token ..." .. tostring(a[2]):sub(-4) .. ")")
 end
-
-local function isBlock(part)
-	if not part or part:IsA("Terrain") then
-		return false
-	end
-	local f = S.BlockFilter
-	if f == "" then
-		return true
-	end
-	f = f:lower()
-	return part.Name:lower():find(f, 1, true) ~= nil or part:GetFullName():lower():find(f, 1, true) ~= nil
-end
-
-local function onStep(part, text)
-	lastStep = os.clock()
-	stepCount += 1
-	push(("[%s] STEP #%d %s"):format(os.date("%H:%M:%S"), stepCount, part and describe(part) or text))
-	setLabel(lblStep, part and ("Block: " .. part.Name) or text)
-	setLabel(lblCount, ("Step: %d | Remote tercatat: %d"):format(stepCount, remoteCount))
-end
-
-local rp = RaycastParams.new()
-rp.FilterType = Enum.RaycastFilterType.Exclude
-local lastChar, lastCell
-RunService.Heartbeat:Connect(function()
-	local char = LP.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if not hrp then
-		return
-	end
-	if char ~= lastChar then
-		lastChar = char
-		rp.FilterDescendantsInstances = { char }
-	end
-	local r = workspace:Raycast(hrp.Position, Vector3.new(0, -8, 0), rp)
-	local part = r and r.Instance
-	if part ~= lastBlock then
-		lastBlock = part
-		if part and isBlock(part) then
-			onStep(part)
-		end
-	end
-	if S.CellMode then
-		local p = hrp.Position
-		local key = math.floor(p.X / S.CellSize + 0.5) .. "," .. math.floor(p.Z / S.CellSize + 0.5)
-		if key ~= lastCell then
-			lastCell = key
-			onStep(nil, ("CELL %s (lantai: %s)"):format(key, part and part.Name or "-"))
-		end
-	end
-end)
-
----------------------------------------------------------------- touch, scan, dump
-local touchSeen = {}
-local function hookChar(char)
-	for _, p in ipairs(char:GetChildren()) do
-		if p:IsA("BasePart") then
-			p.Touched:Connect(function(o)
-				if not S.Touch or o:IsDescendantOf(char) then
-					return
-				end
-				if touchSeen[o] and os.clock() - touchSeen[o] < 1 then
-					return
-				end
-				touchSeen[o] = os.clock()
-				push(("[%s] TOUCH %s [%s] CanQuery=%s"):format(os.date("%H:%M:%S"), path(o), o.ClassName, tostring(o.CanQuery)))
-			end)
-		end
-	end
-end
-if LP.Character then
-	hookChar(LP.Character)
-end
-LP.CharacterAdded:Connect(function(c)
-	task.wait(1)
-	hookChar(c)
-end)
-
-local function scan()
-	local char = LP.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if not hrp then
-		return
-	end
-	local list = {}
-	for _, d in ipairs(workspace:GetDescendants()) do
-		if d:IsA("BasePart") and not d:IsDescendantOf(char) then
-			local dist = (d.Position - hrp.Position).Magnitude
-			if dist <= 30 then
-				list[#list + 1] = { d, dist }
+if hookmetamethod and getnamecallmethod and newcclosure then
+	local old
+	old = hookmetamethod(
+		game,
+		"__namecall",
+		newcclosure(function(self, ...)
+			local m = getnamecallmethod()
+			if
+				(m == "FireServer" or m == "fireServer")
+				and typeof(self) == "Instance"
+				and not checkcaller()
+				and self.Name == "PlaceFlag"
+			then
+				task.defer(setTemplate, table.pack(...))
 			end
-		end
-	end
-	table.sort(list, function(a, b)
-		return a[2] < b[2]
-	end)
-	push(("[%s] SCAN %d part dalam radius 30 stud (posisi avatar %.1f, %.1f, %.1f)"):format(
-		os.date("%H:%M:%S"), #list, hrp.Position.X, hrp.Position.Y, hrp.Position.Z
-	))
-	for i = 1, math.min(#list, 40) do
-		local d = list[i][1]
-		push(("  %.1f stud | %s | CanQuery=%s CanTouch=%s CanCollide=%s Transp=%.2f"):format(
-			list[i][2], describe(d), tostring(d.CanQuery), tostring(d.CanTouch), tostring(d.CanCollide), d.Transparency
-		))
-	end
-end
-
-local function dumpRemotes()
-	push(("[%s] DUMP REMOTE:"):format(os.date("%H:%M:%S")))
-	local n = 0
-	for _, d in ipairs(game:GetDescendants()) do
-		if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") or d:IsA("UnreliableRemoteEvent") then
-			n += 1
-			push(("  [%s] %s"):format(d.ClassName, path(d)))
-		end
-	end
-	push(("  total: %d"):format(n))
-end
-
--- cari di mana string token PlaceFlag tersimpan di sisi client (Value, atribut, teks, nama)
-local function findToken()
-	if not flagTemplate or type(flagTemplate[2]) ~= "string" then
-		push("CARI TOKEN: belum ada template (taruh 1 bendera manual dulu)")
-		return
-	end
-	local tk = flagTemplate[2]
-	push(("[%s] CARI TOKEN %s"):format(os.date("%H:%M:%S"), tk))
-	local found, n = 0, 0
-	local function hit(where)
-		found += 1
-		push("  ditemukan: " .. where)
-	end
-	for _, d in ipairs(game:GetDescendants()) do
-		n += 1
-		if n % 3000 == 0 then
-			task.wait()
-		end
-		pcall(function()
-			if d.Name:find(tk, 1, true) then
-				hit("nama " .. path(d))
-			end
-			if d:IsA("ValueBase") then
-				local v = d.Value
-				if type(v) == "string" and v:find(tk, 1, true) then
-					hit("Value " .. path(d))
-				end
-			elseif d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
-				if d.Text:find(tk, 1, true) then
-					hit("Text " .. path(d))
-				end
-			end
-			for k, v in pairs(d:GetAttributes()) do
-				if type(v) == "string" and v:find(tk, 1, true) then
-					hit(("atribut %s @%s"):format(path(d), k))
-				end
-			end
+			return old(self, ...)
 		end)
-	end
-	push(("  selesai: %d tempat dari %d instance"):format(found, n))
-	if found == 0 then
-		push("  tidak tersimpan di Value/atribut/teks/nama; mungkin dikirim lewat remote (nyalakan Catat remote masuk) atau dihitung di script client")
-	end
+	)
+else
+	warn("[MS] Executor tidak mendukung hookmetamethod: template dari bendera manual tidak bisa dipelajari")
 end
 
 ---------------------------------------------------------------- AUTO FARM (solver minesweeper)
-local F = { Run = false, Busy = false, Guess = false, Human = false, Flagging = true, FlagRange = 12, Delay = 0.15, failed = {} }
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+local function dirs()
+	if not F.Human then
+		return DIRS
+	end
+	local d = { DIRS[1], DIRS[2], DIRS[3], DIRS[4] }
+	for i = 4, 2, -1 do
+		local j = math.random(1, i)
+		d[i], d[j] = d[j], d[i]
+	end
+	return d
+end
 local BROWN = { Color3.new(0.803922, 0.556863, 0.392157), Color3.new(0.705882, 0.490196, 0.345098) }
 
 local function fstatus(t)
@@ -458,8 +292,8 @@ local function buildBoard()
 	local B = { cells = {}, list = {} }
 	for _, p in ipairs(parts:GetChildren()) do
 		if p:IsA("BasePart") then
-			local x = math.floor(p.Position.X / S.CellSize + 0.5)
-			local z = math.floor(p.Position.Z / S.CellSize + 0.5)
+			local x = math.floor(p.Position.X / F.CellSize + 0.5)
+			local z = math.floor(p.Position.Z / F.CellSize + 0.5)
 			local c = { part = p, x = x, z = z, key = ckey(x, z) }
 			local gui = p:FindFirstChild("NumberGui")
 			if flagged(p) then
@@ -596,7 +430,7 @@ local function curCell(B)
 	if not hrp then
 		return nil
 	end
-	return B.cells[ckey(math.floor(hrp.Position.X / S.CellSize + 0.5), math.floor(hrp.Position.Z / S.CellSize + 0.5))]
+	return B.cells[ckey(math.floor(hrp.Position.X / F.CellSize + 0.5), math.floor(hrp.Position.Z / F.CellSize + 0.5))]
 end
 
 -- BFS 4 arah, hanya lewat cell yang sudah terbuka (agar tidak menginjak yang belum terbuka)
@@ -622,21 +456,6 @@ local function bfs(B, from, goalFn)
 		end
 	end
 	return nil
-end
-
--- jeda "berpikir" ala pemain (hanya mode Seperti pemain); kadang lompat di tempat
-local function think(a, b)
-	if not F.Human then
-		return
-	end
-	task.wait(a + math.random() * (b - a))
-	if math.random() < 0.06 then
-		local char = LP.Character
-		local hum = char and char:FindFirstChildOfClass("Humanoid")
-		if hum then
-			hum.Jump = true
-		end
-	end
 end
 
 local function moveTo(cell, straight)
@@ -669,14 +488,14 @@ local function moveTo(cell, straight)
 end
 
 -- jalan lewat cell terbuka (4 arah) ke tetangga yang memenuhi pred, lalu injak tetangga itu.
--- Robot: ambil yang terdekat. Seperti pemain: pilih acak di antara 3 terdekat.
+-- Robot: ambil yang terdekat. Seperti pemain: rute dan target diacak (5 terdekat).
 local function stepToward(B, cur, pred)
 	local prev, dist, order = { [cur.key] = false }, { [cur.key] = 0 }, { cur }
 	local head = 1
 	while head <= #order do
 		local c = order[head]
 		head += 1
-		for _, d in ipairs(DIRS) do
+		for _, d in ipairs(dirs()) do
 			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
 			if n and prev[n.key] == nil and revealed(n) then
 				prev[n.key] = c
@@ -700,7 +519,7 @@ local function stepToward(B, cur, pred)
 	end
 	local pick = cands[1]
 	if F.Human then
-		pick = cands[math.random(1, math.min(#cands, 3))]
+		pick = cands[math.random(1, math.min(#cands, 5))]
 	end
 	local path, w = {}, pick.c
 	while w do
@@ -753,7 +572,6 @@ local function waitFlag(part, t)
 	return false
 end
 local function flagCell(B, cell, src)
-	think(0.3, 0.9)
 	fireFlag(cell.part)
 	if waitFlag(cell.part, 0.5) then
 		return true
@@ -796,6 +614,38 @@ local function guessTarget(B, cons, reduce, mineK)
 		end
 	end
 	return best, bestp
+end
+
+-- coba token otomatis pada satu bom yang sudah pasti; benar bila bendera benar-benar muncul
+local function tryAutoToken(B, mineK)
+	local remote = getFlagRemote()
+	if not remote then
+		return false
+	end
+	local target
+	for _, m in pairs(mineK) do
+		if not flagged(m.cell.part) then
+			target = m
+			break
+		end
+	end
+	if not target then
+		return false
+	end
+	local cands = collectTokens()
+	push(("AUTO TOKEN: %d kandidat"):format(#cands))
+	for i = 1, math.min(#cands, 3) do
+		local tk = cands[i].v
+		push(("  coba #%d (...%s) dari %s"):format(i, tk:sub(-6), cands[i].where))
+		remote:FireServer(target.cell.part, tk, true)
+		if waitFlag(target.cell.part, 1) then
+			flagTemplate = { n = 3, [2] = tk, [3] = true }
+			setLabel(lblTpl, "Template flag: otomatis (token ..." .. tk:sub(-4) .. ")")
+			push("  token valid")
+			return true
+		end
+	end
+	return false
 end
 
 -- bom terdekat (dalam jangkauan) yang belum ditandai
@@ -859,6 +709,13 @@ local function farmLoop()
 		end
 
 		local mineK, safeK, cons, reduce = solve(B)
+		if F.Flagging and F.AutoToken and not flagTemplate and not F.autoTried and next(mineK) then
+			F.autoTried = true
+			fstatus("mencari token flag otomatis")
+			if not tryAutoToken(B, mineK) then
+				UI.CreateNoti({ Title = "Token", Desc = "Tidak ketemu otomatis. Taruh 1 bendera manual.", ShowTime = 4 })
+			end
+		end
 		local canFlag = F.Flagging and flagTemplate ~= nil
 		local acted, stepped = false, false
 
@@ -886,7 +743,6 @@ local function farmLoop()
 			then
 				stepped, acted = true, true
 				task.wait(0.25)
-				think(0.2, 0.9)
 			end
 		end
 
@@ -994,87 +850,10 @@ end
 
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Minesweeper", Desc = " - Minesweeper" })
-local Page = Main:CreatePage({ Page_Name = "Remote Spy", Page_Title = "Remote Spy" })
+local Page = Main:CreatePage({ Page_Name = "Auto Farm", Page_Title = "Auto Farm" })
 
-local Sec = Page.CreateSection("Remote Spy")
-Sec.CreateToggle({ Title = "Aktifkan Spy", Desc = "Catat FireServer / InvokeServer", Default = true }, function(v)
-	S.Spy = v
-end)
-Sec.CreateToggle({ Title = "Hanya dekat step", Desc = "Catat remote hanya setelah melangkah ke block", Default = false }, function(v)
-	S.OnlyStep = v
-end)
-Sec.CreateToggle({ Title = "Deteksi step per kotak", Desc = "Step = pindah kotak grid (untuk lantai 1 part)", Default = true }, function(v)
-	S.CellMode = v
-end)
-Sec.CreateSlider({ Title = "Ukuran kotak (stud)", Min = 1, Max = 20, Default = 5 }, function(v)
-	S.CellSize = v
-	lastCell = nil
-end)
-Sec.CreateToggle({ Title = "Catat sentuhan (TOUCH)", Desc = "Part yang disentuh avatar", Default = false }, function(v)
-	S.Touch = v
-end)
-Sec.CreateSlider({ Title = "Jendela waktu (detik)", Min = 0.1, Max = 5, Default = 1.5, Precise = true }, function(v)
-	S.Window = v
-end)
-Sec.CreateToggle({ Title = "Catat remote masuk (IN)", Desc = "OnClientEvent dari server", Default = false }, function(v)
-	S.Incoming = v
-end)
-
-local Filter = Page.CreateSection("Filter")
-Filter.CreateBox({ Title = "Nama block", Placeholder = "mis. Tile (kosong = semua)" }, function(txt)
-	S.BlockFilter = tostring(txt or "")
-end)
-Filter.CreateBox({ Title = "Abaikan remote", Placeholder = "nama1, nama2", Default = "Patukka, AFKEvent" }, function(txt)
-	S.Ignore = {}
-	for n in tostring(txt or ""):gmatch("[^,]+") do
-		n = n:match("^%s*(.-)%s*$"):lower()
-		if n ~= "" then
-			S.Ignore[n] = true
-		end
-	end
-end)
-
-local Info = Page.CreateSection("Status")
-lblStep = Info.CreateLabel("Block: -")
-lblRemote = Info.CreateLabel("Remote terakhir: -")
-lblCount = Info.CreateLabel("Step: 0 | Remote tercatat: 0")
-
-local Tools = Page.CreateSection("Alat")
-Tools.CreateButton("Scan sekitar avatar", scan)
-Tools.CreateButton("Daftar semua remote", dumpRemotes)
-Tools.CreateButton("Cari asal token flag", findToken)
-
-local Log = Page.CreateSection("Log")
-Log.CreateButton("Copy log", function()
-	if setclipboard then
-		setclipboard(table.concat(logs, "\n"))
-		UI.CreateNoti({ Title = "Log disalin", Desc = #logs .. " baris", ShowTime = 2 })
-	else
-		UI.CreateNoti({ Title = "Gagal", Desc = "Executor tidak punya setclipboard", ShowTime = 3 })
-	end
-end)
-Log.CreateButton("Simpan log ke file", function()
-	local ok = pcall(function()
-		if makefolder and isfolder and not isfolder("Levian Hub") then
-			makefolder("Levian Hub")
-		end
-		writefile("Levian Hub/minesweeper_spy.txt", table.concat(logs, "\n"))
-	end)
-	UI.CreateNoti({
-		Title = ok and "Tersimpan" or "Gagal",
-		Desc = ok and "Levian Hub/minesweeper_spy.txt" or "writefile tidak tersedia",
-		ShowTime = 3,
-	})
-end)
-Log.CreateButton("Hapus log", function()
-	logs, stepCount, remoteCount = {}, 0, 0
-	setLabel(lblCount, "Step: 0 | Remote tercatat: 0")
-	UI.CreateNoti({ Title = "Log dihapus", ShowTime = 2 })
-end)
-
-local FarmPage = Main:CreatePage({ Page_Name = "Auto Farm", Page_Title = "Auto Farm" })
-local FS = FarmPage.CreateSection("Auto Minesweeper")
-lblTpl = FS.CreateLabel("Template flag: belum (taruh 1 bendera manual)")
+local FS = Page.CreateSection("Auto Minesweeper")
+lblTpl = FS.CreateLabel("Template flag: belum ada (dicari otomatis, atau taruh 1 bendera manual)")
 lblFarm = FS.CreateLabel("Status: mati")
 FS.CreateToggle({ Title = "Auto Farm", Desc = "Tandai bom + jalan ke block aman", Default = false }, function(v)
 	F.Run = v
@@ -1082,26 +861,50 @@ FS.CreateToggle({ Title = "Auto Farm", Desc = "Tandai bom + jalan ke block aman"
 		task.spawn(farmLoop)
 	end
 end)
-FS.CreateToggle({ Title = "Tebak kalau buntu", Desc = "Risiko menginjak bom", Default = false }, function(v)
-	F.Guess = v
-end)
-FS.CreateDropdown({ Title = "Gaya jalan", List = { "Robot", "Seperti pemain" }, Default = "Robot" }, function(v)
+FS.CreateDropdown({ Title = "Gaya jalan", List = { "Seperti pemain", "Robot" }, Default = "Seperti pemain" }, function(v)
 	F.Human = (v == "Seperti pemain")
 end)
-FS.CreateToggle({ Title = "Tandai bom", Desc = "Butuh 1 bendera manual dulu (template)", Default = true }, function(v)
+FS.CreateToggle({ Title = "Tandai bom", Desc = "Pasang bendera di bom yang pasti", Default = true }, function(v)
 	F.Flagging = v
 end)
 FS.CreateSlider({ Title = "Jarak tandai bom (stud)", Min = 5, Max = 40, Default = 12 }, function(v)
 	F.FlagRange = v
 end)
+FS.CreateToggle({ Title = "Cari token otomatis", Desc = "Coba maksimal 3 kandidat pada 1 bom pasti", Default = true }, function(v)
+	F.AutoToken = v
+end)
+FS.CreateToggle({ Title = "Tebak kalau buntu", Desc = "Risiko menginjak bom", Default = false }, function(v)
+	F.Guess = v
+end)
 FS.CreateSlider({ Title = "Jeda loop (detik)", Min = 0.05, Max = 1, Default = 0.15, Precise = true }, function(v)
 	F.Delay = v
 end)
-local FT = FarmPage.CreateSection("Cek")
-FT.CreateButton("Dump board (cek pembacaan)", dumpBoard)
 
-UI.CreateNoti({
-	Title = "Minesweeper siap",
-	Desc = hooked and "Remote Spy aktif. Jalan ke block untuk mulai." or "Hook tidak didukung executor ini.",
-	ShowTime = 4,
-})
+local Tools = Page.CreateSection("Alat")
+Tools.CreateButton("Cari token sekarang", function()
+	task.spawn(function()
+		local B = buildBoard()
+		local mineK = B and solve(B)
+		if not mineK or not next(mineK) then
+			UI.CreateNoti({ Title = "Token", Desc = "Belum ada bom pasti untuk dites", ShowTime = 3 })
+			return
+		end
+		local ok = tryAutoToken(B, mineK)
+		UI.CreateNoti({
+			Title = "Token",
+			Desc = ok and "Token valid" or "Tidak ketemu, taruh 1 bendera manual",
+			ShowTime = 3,
+		})
+	end)
+end)
+Tools.CreateButton("Dump board (cek pembacaan)", dumpBoard)
+Tools.CreateButton("Copy log", function()
+	if setclipboard then
+		setclipboard(table.concat(logs, "\n"))
+		UI.CreateNoti({ Title = "Log disalin", Desc = #logs .. " baris", ShowTime = 2 })
+	else
+		UI.CreateNoti({ Title = "Gagal", Desc = "Executor tidak punya setclipboard", ShowTime = 3 })
+	end
+end)
+
+UI.CreateNoti({ Title = "Minesweeper siap", Desc = "Berdiri di block yang sudah terbuka, lalu nyalakan Auto Farm.", ShowTime = 4 })
