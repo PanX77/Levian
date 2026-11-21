@@ -24,6 +24,7 @@ end
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 
 ---------------------------------------------------------------- state
@@ -49,7 +50,76 @@ local F = {
 	WatchBusy = false,
 	firedAt = {}, -- cell key -> time PlaceFlag was last fired on it
 	firedCount = {}, -- cell key -> times PlaceFlag was fired on it this game (max 2)
+	-- dodge spike
+	Dodge = false, -- master switch
+	DodgeMove = true, -- step off cells covered by red parts
+	DodgeJump = true, -- jump when the area is crowded
+	SpikeRadius = 12, -- studs: "area" around the player
+	SpikeCount = 3, -- red parts in the area that count as crowded
+	SpikeJumpDelay = 0.1, -- seconds after the sound cue
+	SpikeFallback = 1.0, -- seconds crowded without a sound cue before jumping anyway (0 = off)
+	SpikeName = "", -- optional: part name that also counts as a spike
+	SpikeSound = "", -- optional: sound name that counts as the cue
+	dodging = false,
+	DodgeBusy = false,
+	redParts = {},
+	areaCount = 0,
+	lastDense = -math.huge,
+	lastCue = 0,
+	lastJump = 0,
+	settingsReady = false,
 }
+
+---------------------------------------------------------------- settings (JSON)
+-- saved to: Levian Hub/<PlayerName>-minesweeper.json
+local SETTINGS_KEYS = {
+	"Guess", "Human", "Flagging", "AutoToken", "PassFlags", "FlagRange", "Delay",
+	"AutoEvent", "AutoSecret", "EventKw", "SecretKw",
+	"Dodge", "DodgeMove", "DodgeJump", "SpikeRadius", "SpikeCount", "SpikeJumpDelay", "SpikeFallback", "SpikeName", "SpikeSound",
+}
+local SETTINGS_FILE = "Levian Hub/" .. LP.Name .. "-minesweeper.json"
+local saveGen = 0
+
+local function loadSettings()
+	local ok, data = pcall(function()
+		if isfile and readfile and isfile(SETTINGS_FILE) then
+			return HttpService:JSONDecode(readfile(SETTINGS_FILE))
+		end
+	end)
+	if ok and type(data) == "table" then
+		for _, k in ipairs(SETTINGS_KEYS) do
+			if data[k] ~= nil and type(data[k]) == type(F[k]) then
+				F[k] = data[k]
+			end
+		end
+	end
+end
+
+-- debounced: sliders fire many times while dragging, the file is written once
+local function saveSettings()
+	if not F.settingsReady then
+		return
+	end
+	saveGen += 1
+	local mine = saveGen
+	task.delay(0.5, function()
+		if mine ~= saveGen then
+			return
+		end
+		pcall(function()
+			if makefolder and isfolder and not isfolder("Levian Hub") then
+				makefolder("Levian Hub")
+			end
+			local t = {}
+			for _, k in ipairs(SETTINGS_KEYS) do
+				t[k] = F[k]
+			end
+			writefile(SETTINGS_FILE, HttpService:JSONEncode(t))
+		end)
+	end)
+end
+
+loadSettings()
 local logs = {}
 local flagTemplate -- PlaceFlag arguments (the part is swapped when used)
 local lblTpl, lblFarm
@@ -278,8 +348,12 @@ local function revealed(c)
 	return c.state == "num" or c.state == "zero"
 end
 -- walkable: opened blocks, or (optionally) flagged blocks
-local function passable(c)
+local function standable(c)
 	return revealed(c) or (F.PassFlags and c.state == "flag")
+end
+-- walkable for routes: standable and not covered by a spike warning
+local function passable(c)
+	return standable(c) and not c.danger
 end
 local function flagged(part)
 	return part:FindFirstChildOfClass("Model") ~= nil or near(part.Color, GREEN)
@@ -329,6 +403,24 @@ local function buildBoard()
 			end
 			B.cells[c.key] = c
 			B.list[#B.list + 1] = c
+		end
+	end
+	if F.Dodge and #F.redParts > 0 then
+		for _, rp in ipairs(F.redParts) do
+			if rp.Parent then
+				local cf, sz, rpos = rp.CFrame, rp.Size, rp.Position
+				local reach2 = (sz.X / 2 + 2.5) ^ 2 + (sz.Z / 2 + 2.5) ^ 2
+				for _, c in ipairs(B.list) do
+					local cp = c.part.Position
+					local dx, dz = cp.X - rpos.X, cp.Z - rpos.Z
+					if dx * dx + dz * dz <= reach2 then
+						local lp = cf:PointToObjectSpace(Vector3.new(cp.X, rpos.Y, cp.Z))
+						if math.abs(lp.X) < sz.X / 2 + 2.5 and math.abs(lp.Z) < sz.Z / 2 + 2.5 then
+							c.danger = true
+						end
+					end
+				end
+			end
 		end
 	end
 	return B
@@ -560,7 +652,7 @@ local function stepToward(B, cur, pred)
 	for _, c in ipairs(order) do
 		for _, d in ipairs(DIRS) do
 			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
-			if n and n.state == "unk" and pred(n) then
+			if n and n.state == "unk" and not n.danger and pred(n) then
 				cands[#cands + 1] = { c = c, n = n }
 				break
 			end
@@ -658,7 +750,7 @@ local function flagCell(B, cell, src)
 	end
 	-- the server may need proximity: walk to the source cell and try again
 	local from = curCell(B)
-	if from and passable(from) then
+	if from and standable(from) then
 		local path = bfs(B, from, function(c)
 			return c == src
 		end)
@@ -807,6 +899,10 @@ local function farmLoop()
 	local notified, lastRevealed, tplSeen = false, 0, flagTemplate
 	local quick = false -- true after stepping: continue without delay
 	while F.Run do
+		if F.dodging then
+			task.wait(0.05)
+			continue
+		end
 		if quick then
 			task.wait()
 		else
@@ -851,7 +947,7 @@ local function farmLoop()
 		end
 
 		local cur = curCell(B)
-		if not cur or not passable(cur) then
+		if not cur or not standable(cur) then
 			fstatus("waiting for the game to start / not on an opened block")
 			task.wait(1)
 			continue
@@ -890,7 +986,7 @@ local function farmLoop()
 
 		-- 2) walk to the nearest safe block
 		cur = curCell(B)
-		if F.Run and not F.abort and cur and passable(cur) and next(safeK) then
+		if F.Run and not F.abort and cur and standable(cur) and next(safeK) then
 			fstatus("walking to a safe block")
 			local okStep, tgt = stepToward(B, cur, function(n)
 				return safeK[n.key] ~= nil
@@ -923,7 +1019,7 @@ local function farmLoop()
 
 		if F.Run and not acted then
 			cur = curCell(B)
-			if F.Guess and cur and passable(cur) then
+			if F.Guess and cur and standable(cur) then
 				local g, p = guessTarget(B, cons, reduce, mineK)
 				if g then
 					fstatus(("guessing %s (risk ~%d%%)"):format(g.key, math.floor(p * 100)))
@@ -1245,13 +1341,312 @@ local function dumpVotes()
 	push(("VOTE total yes-buttons: %d"):format(n))
 end
 
+---------------------------------------------------------------- DODGE SPIKE
+-- Red parts = spike warnings. The bot (1) steps off a cell that red parts cover, using only
+-- opened/flagged cells, and (2) jumps when the area around you is crowded, timed to a sound cue.
+local lblSpike = nil
+local overlap = OverlapParams.new()
+overlap.FilterType = Enum.RaycastFilterType.Exclude
+
+local function isRedPart(p)
+	local c = p.Color
+	if c.R > 0.75 and c.G < 0.25 and c.B < 0.25 then
+		return true
+	end
+	local nm = F.SpikeName:lower()
+	return nm ~= "" and p.Name:lower():find(nm, 1, true) ~= nil
+end
+
+-- visible red parts around pos (the board and every player's character are ignored)
+local function nearbyReds(pos, radius)
+	local ex = {}
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl.Character then
+			ex[#ex + 1] = pl.Character
+		end
+	end
+	local board = workspace:FindFirstChild("Flag")
+	if board then
+		ex[#ex + 1] = board
+	end
+	overlap.FilterDescendantsInstances = ex
+	local out = {}
+	local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, pos, radius, overlap)
+	if ok then
+		for _, p in ipairs(parts) do
+			if p.Transparency < 0.9 and math.abs(p.Position.Y - pos.Y) < 15 and isRedPart(p) then
+				out[#out + 1] = p
+			end
+		end
+	end
+	return out
+end
+
+-- horizontal distance from pos to the footprint of a part (0 = inside it)
+local function flatDist(p, pos)
+	local lp = p.CFrame:PointToObjectSpace(pos)
+	local dx = math.max(math.abs(lp.X) - p.Size.X / 2, 0)
+	local dz = math.max(math.abs(lp.Z) - p.Size.Z / 2, 0)
+	return math.sqrt(dx * dx + dz * dz)
+end
+
+local function jump(reason)
+	if os.clock() - F.lastJump < 0.6 then
+		return
+	end
+	local char = LP.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then
+		F.lastJump = os.clock()
+		pcall(function()
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end)
+		hum.Jump = true
+		push(("[%s] SPIKE jump (%s)"):format(os.date("%H:%M:%S"), reason))
+	end
+end
+
+-- sound cue: a sound that starts playing right after a crowded area was seen => jump (after the delay)
+local function onSound(sn)
+	if not (F.Dodge and F.DodgeJump) or os.clock() - F.lastDense > 2 then
+		return
+	end
+	local nm = F.SpikeSound:lower()
+	if nm ~= "" and not sn.Name:lower():find(nm, 1, true) then
+		return
+	end
+	local par = sn.Parent
+	if par and par:IsA("BasePart") then
+		local char = LP.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp and (par.Position - hrp.Position).Magnitude > 80 then
+			return
+		end
+	end
+	if os.clock() - F.lastCue < 0.15 then
+		return
+	end
+	F.lastCue = os.clock()
+	push(("[%s] SPIKE sound cue: %s -> jump in %.2fs"):format(os.date("%H:%M:%S"), path(sn), F.SpikeJumpDelay))
+	task.delay(F.SpikeJumpDelay, function()
+		jump("sound")
+	end)
+end
+local soundHooked = {}
+local function hookSound(sn)
+	if soundHooked[sn] or not sn:IsA("Sound") then
+		return
+	end
+	soundHooked[sn] = true
+	sn.Played:Connect(function()
+		onSound(sn)
+	end)
+	sn:GetPropertyChangedSignal("Playing"):Connect(function()
+		if sn.Playing then
+			onSound(sn)
+		end
+	end)
+end
+local soundsReady = false
+local function ensureSoundHooks()
+	if soundsReady then
+		return
+	end
+	soundsReady = true
+	for _, root in ipairs({ workspace, game:GetService("SoundService"), PlayerGui }) do
+		task.spawn(function()
+			for _, d in ipairs(root:GetDescendants()) do
+				hookSound(d)
+			end
+		end)
+		root.DescendantAdded:Connect(hookSound)
+	end
+end
+
+-- nearest cell (through opened/flagged cells) that no red part covers
+local function escapePath(B, from)
+	local prev, order = { [from.key] = false }, { from }
+	local head = 1
+	while head <= #order do
+		local c = order[head]
+		head += 1
+		if c ~= from and not c.danger then
+			local p, w = {}, c
+			while w do
+				table.insert(p, 1, w)
+				w = prev[w.key]
+			end
+			return p
+		end
+		for _, d in ipairs(DIRS) do
+			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
+			if n and prev[n.key] == nil and standable(n) then
+				prev[n.key] = c
+				order[#order + 1] = n
+			end
+		end
+	end
+	return nil
+end
+
+local function dodgeWalk(cell)
+	local char = LP.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hum or not hrp then
+		return false
+	end
+	local tx, tz = cell.part.Position.X, cell.part.Position.Z
+	local t0 = os.clock()
+	while F.Dodge and os.clock() - t0 < 1.5 do
+		hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
+		local dx, dz = hrp.Position.X - tx, hrp.Position.Z - tz
+		if math.sqrt(dx * dx + dz * dz) < 1.2 then
+			return true
+		end
+		task.wait(0.03)
+	end
+	return false
+end
+
+local function dodgeLoop()
+	if F.DodgeBusy then
+		return
+	end
+	F.DodgeBusy = true
+	ensureSoundHooks()
+	local denseSince, lastLog, lastText = nil, 0, ""
+	while F.Dodge do
+		task.wait(0.05)
+		local char = LP.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hum or not hrp or hum.Health <= 0 then
+			F.redParts, denseSince = {}, nil
+			continue
+		end
+		local pos = hrp.Position
+		local reds = nearbyReds(pos, 80)
+		F.redParts = reds -- also used by buildBoard to mark covered cells as danger
+		local area, under = 0, 0
+		for _, p in ipairs(reds) do
+			local d = flatDist(p, pos)
+			if d <= F.SpikeRadius then
+				area += 1
+			end
+			if d <= 2.2 then
+				under += 1
+			end
+		end
+		F.areaCount = area
+		local text = ("Spikes: %d in area, %d under you"):format(area, under)
+		if text ~= lastText then
+			lastText = text
+			setLabel(lblSpike, text)
+		end
+
+		-- crowded area: jump on the sound cue (or after the fallback time if no cue came)
+		if F.DodgeJump and area >= F.SpikeCount then
+			F.lastDense = os.clock()
+			denseSince = denseSince or os.clock()
+			if os.clock() - lastLog > 1 then
+				lastLog = os.clock()
+				push(("[%s] SPIKE crowded: %d red parts within %.0f studs"):format(os.date("%H:%M:%S"), area, F.SpikeRadius))
+			end
+			if F.SpikeFallback > 0 and os.clock() - denseSince >= F.SpikeFallback and F.lastCue < denseSince then
+				jump("fallback")
+				denseSince = os.clock()
+			end
+		else
+			denseSince = nil
+		end
+
+		-- a red part covers your cell: step to the nearest uncovered opened/flagged cell
+		if F.DodgeMove and under > 0 and not F.dodging then
+			local B = buildBoard()
+			local cur = B and curCell(B)
+			if cur and cur.danger and standable(cur) then
+				local path2 = escapePath(B, cur)
+				if path2 and #path2 >= 2 then
+					F.dodging, F.abort = true, true -- pause the farm loop while we move
+					push(("[%s] SPIKE dodge: %s -> %s"):format(os.date("%H:%M:%S"), cur.key, path2[#path2].key))
+					for i = 2, #path2 do
+						if not dodgeWalk(path2[i]) then
+							break
+						end
+					end
+					stopWalking()
+					F.dodging = false
+				elseif F.DodgeJump then
+					jump("no free cell to step to")
+				end
+			end
+		end
+	end
+	F.redParts = {}
+	F.DodgeBusy = false
+end
+
+local function dumpSpikes()
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		push("SPIKES: no character")
+		return
+	end
+	local pos = hrp.Position
+	local reds = nearbyReds(pos, 80)
+	push(("[%s] SPIKES: %d red parts within 80 studs (avatar %.1f, %.1f, %.1f)"):format(
+		os.date("%H:%M:%S"), #reds, pos.X, pos.Y, pos.Z
+	))
+	for i, p in ipairs(reds) do
+		if i > 40 then
+			break
+		end
+		push(("  %.1f studs | %s [%s] | size %.1f,%.1f,%.1f | transp %.2f | %s | CanQuery=%s CanCollide=%s"):format(
+			flatDist(p, pos), path(p), p.ClassName, p.Size.X, p.Size.Y, p.Size.Z, p.Transparency,
+			p.Material.Name, tostring(p.CanQuery), tostring(p.CanCollide)
+		))
+	end
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d:IsA("Sound") and d.IsPlaying then
+			push(("  SOUND playing: %s | id %s | vol %.2f"):format(path(d), tostring(d.SoundId), d.Volume))
+		end
+	end
+end
+
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Levian Hub - Minesweeper" })
+
+-- "About Us": big, centered heading (the library's label has no size option, so restyle it after creation)
+local function styleHeading(text)
+	pcall(function()
+		local host = (gethui and gethui()) or game:GetService("CoreGui")
+		local gui = host:FindFirstChild("Levian Hub GUI")
+		if not gui then
+			return
+		end
+		for _, d in ipairs(gui:GetDescendants()) do
+			if d:IsA("TextLabel") and d.Text == text then
+				d.TextSize = 36
+				d.Font = Enum.Font.GothamBold
+				d.TextXAlignment = Enum.TextXAlignment.Center
+				d.TextYAlignment = Enum.TextYAlignment.Center
+				d.TextTruncate = Enum.TextTruncate.None
+				if d.Parent and d.Parent:IsA("Frame") then
+					d.Parent.Size = UDim2.new(1, 0, 0, 64)
+				end
+				return
+			end
+		end
+	end)
+end
 
 local DISCORD_LINK = "https://discord.gg/Mc2YpMT2cF"
 local About = Main:CreatePage({ Page_Name = "About Us", Page_Title = "About Us" })
 local AS = About.CreateSection("About Us")
 AS.CreateLabel("Levian Hub")
+styleHeading("Levian Hub")
 AS.CreateButton("Copy Link", function()
 	if setclipboard then
 		setclipboard(DISCORD_LINK)
@@ -1261,6 +1656,24 @@ AS.CreateButton("Copy Link", function()
 	end
 end)
 
+local function copyLog()
+	if setclipboard then
+		setclipboard(table.concat(logs, "\n"))
+		UI.CreateNoti({ Title = "Log copied", Desc = #logs .. " lines", ShowTime = 2 })
+	else
+		UI.CreateNoti({ Title = "Failed", Desc = "Executor has no setclipboard", ShowTime = 3 })
+	end
+end
+
+-- every setting control: starts from the saved value and saves on change
+local function setting(key)
+	return function(v)
+		F[key] = v
+		saveSettings()
+	end
+end
+
+---------------------------------------------------------------- page: Auto Farm
 local Page = Main:CreatePage({ Page_Name = "Auto Farm", Page_Title = "Auto Farm" })
 
 local FS = Page.CreateSection("Auto Minesweeper")
@@ -1276,48 +1689,16 @@ FS.CreateToggle({ Title = "Auto Farm", Desc = "Flag mines + walk to safe blocks"
 		stopWalking()
 	end
 end)
-FS.CreateDropdown({ Title = "Walking style", List = { "Human-like", "Robot" }, Default = "Human-like" }, function(v)
+FS.CreateDropdown({ Title = "Walking style", List = { "Human-like", "Robot" }, Default = F.Human and "Human-like" or "Robot" }, function(v)
 	F.Human = (v == "Human-like")
+	saveSettings()
 end)
-FS.CreateToggle({ Title = "Flag mines", Desc = "Place flags on certain mines", Default = true }, function(v)
-	F.Flagging = v
-end)
-FS.CreateSlider({ Title = "Flag range (studs)", Min = 5, Max = 40, Default = 12 }, function(v)
-	F.FlagRange = v
-end)
-FS.CreateToggle({ Title = "Auto find token", Desc = "Tries up to 3 candidates on 1 certain mine", Default = false }, function(v)
-	F.AutoToken = v
-end)
-FS.CreateToggle({ Title = "Walk over flags", Desc = "Walk on flagged blocks for shorter routes", Default = true }, function(v)
-	F.PassFlags = v
-end)
-FS.CreateToggle({ Title = "Guess when stuck", Desc = "Risk of stepping on a mine", Default = false }, function(v)
-	F.Guess = v
-end)
-FS.CreateSlider({ Title = "Loop delay (seconds)", Min = 0.05, Max = 1, Default = 0.15, Precise = true }, function(v)
-	F.Delay = v
-end)
-
-local EV = Page.CreateSection("Events")
-lblEvent = EV.CreateLabel("Event: idle")
-EV.CreateToggle({ Title = "Auto join event", Desc = 'Presses "Yes" on the event round vote', Default = false }, function(v)
-	F.AutoEvent = v
-	if v then
-		task.spawn(eventLoop, "AutoEvent", "event", 0.05)
-	end
-end)
-EV.CreateToggle({ Title = "Auto join secret event", Desc = 'Spams "Yes" until the secret event vote shows up', Default = false }, function(v)
-	F.AutoSecret = v
-	if v then
-		task.spawn(eventLoop, "AutoSecret", "secret", 0.05)
-	end
-end)
-EV.CreateBox({ Title = "Event vote text", Placeholder = "event round", Default = "event round" }, function(txt)
-	F.EventKw = tostring(txt or "")
-end)
-EV.CreateBox({ Title = "Secret vote text", Placeholder = "secret", Default = "secret" }, function(txt)
-	F.SecretKw = tostring(txt or "")
-end)
+FS.CreateToggle({ Title = "Flag mines", Desc = "Place flags on certain mines", Default = F.Flagging }, setting("Flagging"))
+FS.CreateSlider({ Title = "Flag range (studs)", Min = 5, Max = 40, Default = F.FlagRange }, setting("FlagRange"))
+FS.CreateToggle({ Title = "Auto find token", Desc = "Tries up to 3 candidates on 1 certain mine", Default = F.AutoToken }, setting("AutoToken"))
+FS.CreateToggle({ Title = "Walk over flags", Desc = "Walk on flagged blocks for shorter routes", Default = F.PassFlags }, setting("PassFlags"))
+FS.CreateToggle({ Title = "Guess when stuck", Desc = "Risk of stepping on a mine", Default = F.Guess }, setting("Guess"))
+FS.CreateSlider({ Title = "Loop delay (seconds)", Min = 0.05, Max = 1, Default = F.Delay, Precise = true }, setting("Delay"))
 
 local Tools = Page.CreateSection("Tools")
 Tools.CreateButton("Find token now", function()
@@ -1337,14 +1718,67 @@ Tools.CreateButton("Find token now", function()
 	end)
 end)
 Tools.CreateButton("Dump board (check reading)", dumpBoard)
-Tools.CreateButton("Dump vote prompts", dumpVotes)
-Tools.CreateButton("Copy log", function()
-	if setclipboard then
-		setclipboard(table.concat(logs, "\n"))
-		UI.CreateNoti({ Title = "Log copied", Desc = #logs .. " lines", ShowTime = 2 })
-	else
-		UI.CreateNoti({ Title = "Failed", Desc = "Executor has no setclipboard", ShowTime = 3 })
+Tools.CreateButton("Copy log", copyLog)
+
+---------------------------------------------------------------- page: Events
+local EventPage = Main:CreatePage({ Page_Name = "Events", Page_Title = "Events" })
+
+local EV = EventPage.CreateSection("Event Votes")
+lblEvent = EV.CreateLabel("Event: idle")
+EV.CreateToggle({ Title = "Auto join event", Desc = 'Presses "Yes" on the event round vote', Default = F.AutoEvent }, function(v)
+	F.AutoEvent = v
+	saveSettings()
+	if v then
+		task.spawn(eventLoop, "AutoEvent", "event", 0.05)
 	end
 end)
+EV.CreateToggle({ Title = "Auto join secret event", Desc = 'Spams "Yes" until the secret event vote shows up', Default = F.AutoSecret }, function(v)
+	F.AutoSecret = v
+	saveSettings()
+	if v then
+		task.spawn(eventLoop, "AutoSecret", "secret", 0.05)
+	end
+end)
+EV.CreateBox({ Title = "Event vote text", Placeholder = "event round", Default = F.EventKw }, function(txt)
+	F.EventKw = tostring(txt or "")
+	saveSettings()
+end)
+EV.CreateBox({ Title = "Secret vote text", Placeholder = "secret", Default = F.SecretKw }, function(txt)
+	F.SecretKw = tostring(txt or "")
+	saveSettings()
+end)
+
+local DS = EventPage.CreateSection("Dodge Spike")
+lblSpike = DS.CreateLabel("Spikes: idle")
+DS.CreateToggle({ Title = "Dodge spike", Desc = "Avoid red parts and jump when crowded", Default = F.Dodge }, function(v)
+	F.Dodge = v
+	saveSettings()
+	if v then
+		task.spawn(dodgeLoop)
+	end
+end)
+DS.CreateToggle({ Title = "Move off red parts", Desc = "Step to the nearest cell they don't cover", Default = F.DodgeMove }, setting("DodgeMove"))
+DS.CreateToggle({ Title = "Jump when crowded", Desc = "Jump on the sound cue when many red parts are near", Default = F.DodgeJump }, setting("DodgeJump"))
+DS.CreateSlider({ Title = "Area radius (studs)", Min = 4, Max = 30, Default = F.SpikeRadius }, setting("SpikeRadius"))
+DS.CreateSlider({ Title = "Crowded at (red parts)", Min = 1, Max = 15, Default = F.SpikeCount }, setting("SpikeCount"))
+DS.CreateSlider({ Title = "Jump delay after sound (s)", Min = 0, Max = 1, Default = F.SpikeJumpDelay, Precise = true }, setting("SpikeJumpDelay"))
+DS.CreateSlider({ Title = "Fallback jump, no sound (s)", Min = 0, Max = 3, Default = F.SpikeFallback, Precise = true }, setting("SpikeFallback"))
+DS.CreateBox({ Title = "Spike part name (optional)", Placeholder = "also count parts with this name", Default = F.SpikeName }, function(txt)
+	F.SpikeName = tostring(txt or "")
+	saveSettings()
+end)
+DS.CreateBox({ Title = "Spike sound name (optional)", Placeholder = "only this sound is the cue", Default = F.SpikeSound }, function(txt)
+	F.SpikeSound = tostring(txt or "")
+	saveSettings()
+end)
+
+local ET = EventPage.CreateSection("Tools")
+ET.CreateButton("Dump vote prompts", dumpVotes)
+ET.CreateButton("Dump spikes", dumpSpikes)
+ET.CreateButton("Copy log", copyLog)
+
+-- all controls exist now: from here on changes are written to Levian Hub/<name>-minesweeper.json
+F.settingsReady = true
+saveSettings()
 
 UI.CreateNoti({ Title = "Minesweeper ready", Desc = "Stand on an opened block, then turn on Auto Farm.", ShowTime = 4 })
