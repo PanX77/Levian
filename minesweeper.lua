@@ -258,6 +258,7 @@ local function dirs()
 	end
 	return d
 end
+local GREEN = Color3.new(0, 0.988235, 0) -- flagged cell color
 local BROWN = { Color3.new(0.803922, 0.556863, 0.392157), Color3.new(0.705882, 0.490196, 0.345098) }
 
 local function fstatus(t)
@@ -277,7 +278,7 @@ local function passable(c)
 	return revealed(c) or (F.PassFlags and c.state == "flag")
 end
 local function flagged(part)
-	return part:FindFirstChildOfClass("Model") ~= nil
+	return part:FindFirstChildOfClass("Model") ~= nil or near(part.Color, GREEN)
 end
 
 local function readNumber(gui)
@@ -1016,18 +1017,33 @@ local function realClick(btn)
 	end)
 end
 
--- press Yes: signal and real click alternate every 0.05s until the prompt changes ("You can't back out now.")
+-- "x/y votes required." -> x, y
+local function voteCount(txt)
+	local a, b = txt:match("(%d+)%s*/%s*(%d+)%s*votes")
+	return tonumber(a), tonumber(b)
+end
+
+-- press Yes: signal and real click alternate every 0.05s until the prompt closes, the vote is full,
+-- or "You can't back out now." shows up
 local function pressYes(btn, kind)
 	local hasSignal = (firesignal or getconnections) ~= nil
 	for i = 1, 8 do
 		if not btn.Parent or not shown(btn) then
 			return true
 		end
-		if promptText(btn):find("back out", 1, true) then
+		local txt = promptText(btn)
+		if txt:find("back out", 1, true) then
+			return true
+		end
+		local cur, req = voteCount(txt)
+		if cur and req and cur >= req then
 			return true
 		end
 		local viaSignal = hasSignal and i % 2 == 1
-		push(("  %s attempt %d via %s"):format(kind, i, viaSignal and "signal" or "real click"))
+		local p, s = btn.AbsolutePosition, btn.AbsoluteSize
+		push(("  %s attempt %d via %s | pos %.0f,%.0f size %.0f,%.0f | votes %s/%s"):format(
+			kind, i, viaSignal and "signal" or "real click", p.X, p.Y, s.X, s.Y, tostring(cur), tostring(req)
+		))
 		if viaSignal then
 			signalClick(btn)
 		else
@@ -1051,15 +1067,18 @@ local function promptMatches(kind, txt)
 end
 
 local seenAt = {} -- btn -> time the matching prompt was first seen
+local done = {} -- btn -> true once the vote went through (reset when the prompt hides or restarts at 0)
 local function eventLoop(flag, kind, interval)
 	while F[flag] do
 		for btn in pairs(yesBtns) do
 			if not btn.Parent then
-				yesBtns[btn] = nil
-				seenAt[btn] = nil
+				yesBtns[btn], seenAt[btn], done[btn] = nil, nil, nil
 			elseif shown(btn) then
 				local txt = promptText(btn)
-				if promptMatches(kind, txt) and not txt:find("back out", 1, true) then
+				if done[btn] and voteCount(txt) == 0 then
+					done[btn] = nil -- a new vote started on the same prompt
+				end
+				if promptMatches(kind, txt) and not txt:find("back out", 1, true) and not done[btn] then
 					if not seenAt[btn] then
 						seenAt[btn] = os.clock()
 						push(("[%s] VOTE %s prompt seen: %q"):format(os.date("%H:%M:%S"), kind, txt:sub(1, 100)))
@@ -1068,24 +1087,38 @@ local function eventLoop(flag, kind, interval)
 						F.pressing = true
 						local ok = pressYes(btn, kind)
 						F.pressing = false
-						push(("[%s] VOTE %s %s after %.2fs"):format(os.date("%H:%M:%S"), kind, ok and "sent" or "failed", os.clock() - seenAt[btn]))
-						setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " vote failed, retrying"))
+						if ok then
+							done[btn] = true
+						end
+						push(("[%s] VOTE %s %s after %.2fs"):format(os.date("%H:%M:%S"), kind, ok and "sent" or "still trying", os.clock() - seenAt[btn]))
+						setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " still trying"))
 					end
 				end
 			else
-				seenAt[btn] = nil
+				seenAt[btn], done[btn] = nil, nil
 			end
 		end
 		task.wait(interval)
 	end
 end
 
+local function connCount(sig)
+	if not getconnections then
+		return "n/a"
+	end
+	local ok, c = pcall(getconnections, sig)
+	return ok and tostring(#c) or "err"
+end
+
 local function dumpVotes()
 	local n = 0
 	for btn in pairs(yesBtns) do
 		n += 1
-		push(("VOTE yes-button %s | shown=%s | prompt=%q"):format(
-			path(btn), tostring(btn.Parent ~= nil and shown(btn)), promptText(btn):sub(1, 140)
+		local par = btn.Parent
+		local parentClick = par and par:IsA("GuiButton") and connCount(par.MouseButton1Click) or "-"
+		push(("VOTE yes-button %s | shown=%s | click=%s activated=%s parentClick=%s | prompt=%q"):format(
+			path(btn), tostring(btn.Parent ~= nil and shown(btn)), connCount(btn.MouseButton1Click),
+			connCount(btn.Activated), parentClick, promptText(btn):sub(1, 140)
 		))
 	end
 	push(("VOTE total yes-buttons: %d"):format(n))
