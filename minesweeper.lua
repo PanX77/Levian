@@ -458,6 +458,19 @@ local function bfs(B, from, goalFn)
 	return nil
 end
 
+-- tunggu sampai block yang diinjak terbuka (cek tiap 0.02 dtk), bukan jeda tetap
+local function waitRevealed(cell)
+	local t0 = os.clock()
+	while F.Run and os.clock() - t0 < 0.6 do
+		local p = cell.part
+		if p:FindFirstChild("NumberGui") or not (near(p.Color, BROWN[1]) or near(p.Color, BROWN[2])) then
+			return true
+		end
+		task.wait(0.02)
+	end
+	return false
+end
+
 local function moveTo(cell, straight)
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -468,9 +481,9 @@ local function moveTo(cell, straight)
 	local tx, tz = cell.part.Position.X, cell.part.Position.Z
 	local thr = 1.2
 	if F.Human then
-		-- sedikit meleset dari tengah (maks 0.5 stud), tetap jauh dari tepi kotak
-		tx += math.random() - 0.5
-		tz += math.random() - 0.5
+		-- sedikit meleset dari tengah (maks 0.3 stud), tetap jauh dari tepi kotak
+		tx += (math.random() - 0.5) * 0.6
+		tz += (math.random() - 0.5) * 0.6
 		if straight then
 			thr = 2.2 -- jalan lurus: lanjut ke kotak berikut tanpa berhenti di tengah
 		end
@@ -482,7 +495,7 @@ local function moveTo(cell, straight)
 		if math.sqrt(dx * dx + dz * dz) < thr then
 			return true
 		end
-		task.wait(0.08)
+		task.wait(0.03)
 	end
 	return false
 end
@@ -545,7 +558,7 @@ local function stepToward(B, cur, pred)
 		return false
 	end
 	moveTo(pick.n)
-	return true
+	return true, pick.n
 end
 
 -- bendera: pakai argumen yang dipelajari dari PlaceFlag manual terakhir, ganti part-nya saja
@@ -673,8 +686,14 @@ local function farmLoop()
 	end
 	F.Busy, F.failed = true, {}
 	local notified, lastRevealed, tplSeen = false, 0, flagTemplate
+	local quick = false -- true setelah melangkah: lanjut tanpa jeda
 	while F.Run do
-		task.wait(F.Delay * (0.7 + math.random() * 0.6))
+		if quick then
+			task.wait()
+		else
+			task.wait(F.Delay * (0.7 + math.random() * 0.6))
+		end
+		quick = false
 		local char = LP.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -747,13 +766,12 @@ local function farmLoop()
 		cur = curCell(B)
 		if F.Run and cur and revealed(cur) and next(safeK) then
 			fstatus("jalan ke block aman")
-			if
-				stepToward(B, cur, function(n)
-					return safeK[n.key] ~= nil
-				end)
-			then
-				stepped, acted = true, true
-				task.wait(0.25)
+			local okStep, tgt = stepToward(B, cur, function(n)
+				return safeK[n.key] ~= nil
+			end)
+			if okStep then
+				stepped, acted, quick = true, true, true
+				waitRevealed(tgt)
 			end
 		end
 
@@ -779,10 +797,13 @@ local function farmLoop()
 				local g, p = guessTarget(B, cons, reduce, mineK)
 				if g then
 					fstatus(("menebak %s (risiko ~%d%%)"):format(g.key, math.floor(p * 100)))
-					stepToward(B, cur, function(n)
+					local okG, tg = stepToward(B, cur, function(n)
 						return n == g
 					end)
-					task.wait(0.4)
+					if okG then
+						waitRevealed(tg)
+						quick = true
+					end
 					acted = true
 				end
 			end
