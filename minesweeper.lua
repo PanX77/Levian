@@ -40,6 +40,11 @@ local F = {
 	CellSize = 5, -- size of 1 cell (studs)
 	failed = {},
 	autoTried = false,
+	AutoEvent = false, -- press "Yes" on the event round vote
+	AutoSecret = false, -- spam "Yes" until the secret event vote shows up
+	EventKw = "event round", -- text that identifies the event vote
+	SecretKw = "secret", -- text that identifies the secret event vote
+	pressing = false,
 }
 local logs = {}
 local flagTemplate -- PlaceFlag arguments (the part is swapped when used)
@@ -885,6 +890,195 @@ local function dumpBoard()
 	push("  flag template: " .. (flagTemplate and ser(flagTemplate[1]) .. " ... (ready)" or "none"))
 end
 
+---------------------------------------------------------------- EVENT VOTES (auto "Yes")
+local okV, VIM = pcall(function()
+	return game:GetService("VirtualInputManager")
+end)
+if not okV then
+	VIM = nil
+end
+local GuiService = game:GetService("GuiService")
+local PlayerGui = LP:WaitForChild("PlayerGui")
+local lblEvent = nil
+
+local function trim(t)
+	return (tostring(t):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- cache of "Yes" buttons (TextButton, or a TextLabel inside a GuiButton), kept up to date by events
+local yesBtns = {}
+local function yesTarget(d)
+	if d:IsA("TextButton") and trim(d.Text):lower() == "yes" then
+		return d
+	end
+	if d:IsA("TextLabel") and trim(d.Text):lower() == "yes" then
+		local p = d.Parent
+		if p and p:IsA("GuiButton") then
+			return p
+		end
+	end
+	return nil
+end
+local function consider(d)
+	local b = yesTarget(d)
+	if b then
+		yesBtns[b] = true
+	end
+end
+local function onGuiAdded(d)
+	consider(d)
+	if d:IsA("TextButton") or d:IsA("TextLabel") then
+		d:GetPropertyChangedSignal("Text"):Connect(function()
+			consider(d)
+		end)
+	end
+end
+for _, d in ipairs(PlayerGui:GetDescendants()) do
+	onGuiAdded(d)
+end
+PlayerGui.DescendantAdded:Connect(function(d)
+	task.defer(onGuiAdded, d)
+end)
+
+-- really visible on screen (every ancestor visible/enabled, non-zero size)
+local function shown(g)
+	local node = g
+	while node and node ~= game do
+		if node:IsA("GuiObject") and not node.Visible then
+			return false
+		end
+		if node:IsA("LayerCollector") and not node.Enabled then
+			return false
+		end
+		node = node.Parent
+	end
+	return g:IsDescendantOf(PlayerGui) and g.AbsoluteSize.X > 0 and g.AbsoluteSize.Y > 0
+end
+
+-- all text of the prompt that contains this Yes button (the container that also has a "No")
+local function promptText(btn)
+	local function collect(node)
+		local t = {}
+		for _, d in ipairs(node:GetDescendants()) do
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				t[#t + 1] = d.Text
+			end
+		end
+		return table.concat(t, " "):lower()
+	end
+	local node = btn.Parent
+	for _ = 1, 5 do
+		if not node or not node:IsA("GuiObject") then
+			break
+		end
+		for _, d in ipairs(node:GetDescendants()) do
+			if (d:IsA("TextButton") or d:IsA("TextLabel")) and trim(d.Text):lower() == "no" then
+				return collect(node)
+			end
+		end
+		node = node.Parent
+	end
+	local fallback = btn.Parent and (btn.Parent.Parent or btn.Parent)
+	return fallback and collect(fallback) or ""
+end
+
+local function signalClick(btn)
+	if firesignal then
+		pcall(firesignal, btn.MouseButton1Click)
+		pcall(firesignal, btn.Activated)
+	elseif getconnections then
+		pcall(function()
+			for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+				c:Fire()
+			end
+		end)
+		pcall(function()
+			for _, c in ipairs(getconnections(btn.Activated)) do
+				c:Fire()
+			end
+		end)
+	end
+end
+
+local function realClick(btn)
+	if not VIM then
+		return
+	end
+	local p, s = btn.AbsolutePosition, btn.AbsoluteSize
+	local x, y = p.X + s.X / 2, p.Y + s.Y / 2
+	local sg = btn:FindFirstAncestorOfClass("ScreenGui")
+	if sg and not sg.IgnoreGuiInset then
+		y += GuiService:GetGuiInset().Y
+	end
+	pcall(function()
+		VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		task.wait(0.03)
+		VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+	end)
+end
+
+-- press Yes: signal first, then a real click, retried until the prompt changes ("You can't back out now.")
+local function pressYes(btn)
+	local hasSignal = (firesignal or getconnections) ~= nil
+	for i = 1, 4 do
+		if not btn.Parent or not shown(btn) then
+			return true
+		end
+		if promptText(btn):find("back out", 1, true) then
+			return true
+		end
+		if hasSignal and i % 2 == 1 then
+			signalClick(btn)
+		else
+			realClick(btn)
+		end
+		task.wait(0.12)
+	end
+	return false
+end
+
+local function promptMatches(kind, txt)
+	if txt == "" or txt:find("kick", 1, true) then
+		return false -- never vote on a votekick prompt
+	end
+	local sk, ek = F.SecretKw:lower(), F.EventKw:lower()
+	local hasSecret = sk ~= "" and txt:find(sk, 1, true) ~= nil
+	if kind == "secret" then
+		return hasSecret
+	end
+	return ek ~= "" and txt:find(ek, 1, true) ~= nil and not hasSecret
+end
+
+local function eventLoop(flag, kind, interval)
+	while F[flag] do
+		for btn in pairs(yesBtns) do
+			if not btn.Parent then
+				yesBtns[btn] = nil
+			elseif not F.pressing and shown(btn) then
+				local txt = promptText(btn)
+				if promptMatches(kind, txt) and not txt:find("back out", 1, true) then
+					F.pressing = true
+					local ok = pressYes(btn)
+					F.pressing = false
+					setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " vote failed, retrying"))
+				end
+			end
+		end
+		task.wait(interval)
+	end
+end
+
+local function dumpVotes()
+	local n = 0
+	for btn in pairs(yesBtns) do
+		n += 1
+		push(("VOTE yes-button %s | shown=%s | prompt=%q"):format(
+			path(btn), tostring(btn.Parent ~= nil and shown(btn)), promptText(btn):sub(1, 140)
+		))
+	end
+	push(("VOTE total yes-buttons: %d"):format(n))
+end
+
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Levian Hub - Minesweeper" })
 
@@ -934,6 +1128,27 @@ FS.CreateSlider({ Title = "Loop delay (seconds)", Min = 0.05, Max = 1, Default =
 	F.Delay = v
 end)
 
+local EV = Page.CreateSection("Events")
+lblEvent = EV.CreateLabel("Event: idle")
+EV.CreateToggle({ Title = "Auto join event", Desc = 'Presses "Yes" on the event round vote', Default = false }, function(v)
+	F.AutoEvent = v
+	if v then
+		task.spawn(eventLoop, "AutoEvent", "event", 0.25)
+	end
+end)
+EV.CreateToggle({ Title = "Auto join secret event", Desc = 'Spams "Yes" until the secret event vote shows up', Default = false }, function(v)
+	F.AutoSecret = v
+	if v then
+		task.spawn(eventLoop, "AutoSecret", "secret", 0.05)
+	end
+end)
+EV.CreateBox({ Title = "Event vote text", Placeholder = "event round", Default = "event round" }, function(txt)
+	F.EventKw = tostring(txt or "")
+end)
+EV.CreateBox({ Title = "Secret vote text", Placeholder = "secret", Default = "secret" }, function(txt)
+	F.SecretKw = tostring(txt or "")
+end)
+
 local Tools = Page.CreateSection("Tools")
 Tools.CreateButton("Find token now", function()
 	task.spawn(function()
@@ -952,6 +1167,7 @@ Tools.CreateButton("Find token now", function()
 	end)
 end)
 Tools.CreateButton("Dump board (check reading)", dumpBoard)
+Tools.CreateButton("Dump vote prompts", dumpVotes)
 Tools.CreateButton("Copy log", function()
 	if setclipboard then
 		setclipboard(table.concat(logs, "\n"))
