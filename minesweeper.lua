@@ -34,6 +34,7 @@ local F = {
 	Human = true, -- gaya jalan: rute dan target diacak
 	Flagging = true,
 	AutoToken = true,
+	PassFlags = true, -- boleh lewat di atas block yang sudah berbendera (jalan lebih pendek)
 	FlagRange = 12, -- stud
 	Delay = 0.15,
 	CellSize = 5, -- ukuran 1 kotak (stud)
@@ -266,6 +267,10 @@ end
 local function revealed(c)
 	return c.state == "num" or c.state == "zero"
 end
+-- boleh diinjak/dilewati: block terbuka, atau (opsional) block yang sudah diberi bendera
+local function passable(c)
+	return revealed(c) or (F.PassFlags and c.state == "flag")
+end
 local function flagged(part)
 	return part:FindFirstChildOfClass("Model") ~= nil
 end
@@ -449,7 +454,7 @@ local function bfs(B, from, goalFn)
 		end
 		for _, d in ipairs(DIRS) do
 			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
-			if n and prev[n.key] == nil and revealed(n) then
+			if n and prev[n.key] == nil and passable(n) then
 				prev[n.key] = c
 				q[#q + 1] = n
 			end
@@ -510,7 +515,7 @@ local function stepToward(B, cur, pred)
 		head += 1
 		for _, d in ipairs(dirs()) do
 			local n = B.cells[ckey(c.x + d[1], c.z + d[2])]
-			if n and prev[n.key] == nil and revealed(n) then
+			if n and prev[n.key] == nil and passable(n) then
 				prev[n.key] = c
 				dist[n.key] = dist[c.key] + 1
 				order[#order + 1] = n
@@ -595,7 +600,7 @@ local function flagCell(B, cell, src)
 	end
 	-- mungkin server butuh jarak dekat: jalan ke cell sumber lalu coba lagi
 	local from = curCell(B)
-	if from and revealed(from) then
+	if from and passable(from) then
 		local path = bfs(B, from, function(c)
 			return c == src
 		end)
@@ -725,7 +730,7 @@ local function farmLoop()
 		end
 
 		local cur = curCell(B)
-		if not cur or not revealed(cur) then
+		if not cur or not passable(cur) then
 			fstatus("menunggu game mulai / belum di atas block terbuka")
 			task.wait(1)
 			continue
@@ -764,7 +769,7 @@ local function farmLoop()
 
 		-- 2) jalan ke block aman terdekat
 		cur = curCell(B)
-		if F.Run and cur and revealed(cur) and next(safeK) then
+		if F.Run and cur and passable(cur) and next(safeK) then
 			fstatus("jalan ke block aman")
 			local okStep, tgt = stepToward(B, cur, function(n)
 				return safeK[n.key] ~= nil
@@ -793,7 +798,7 @@ local function farmLoop()
 
 		if F.Run and not acted then
 			cur = curCell(B)
-			if F.Guess and cur and revealed(cur) then
+			if F.Guess and cur and passable(cur) then
 				local g, p = guessTarget(B, cons, reduce, mineK)
 				if g then
 					fstatus(("menebak %s (risiko ~%d%%)"):format(g.key, math.floor(p * 100)))
@@ -904,6 +909,9 @@ FS.CreateSlider({ Title = "Jarak tandai bom (stud)", Min = 5, Max = 40, Default 
 end)
 FS.CreateToggle({ Title = "Cari token otomatis", Desc = "Coba maksimal 3 kandidat pada 1 bom pasti", Default = true }, function(v)
 	F.AutoToken = v
+end)
+FS.CreateToggle({ Title = "Lewat di atas bendera", Desc = "Jalan di block berbendera agar rute lebih pendek", Default = true }, function(v)
+	F.PassFlags = v
 end)
 FS.CreateToggle({ Title = "Tebak kalau buntu", Desc = "Risiko menginjak bom", Default = false }, function(v)
 	F.Guess = v
