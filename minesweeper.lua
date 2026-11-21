@@ -33,7 +33,7 @@ local F = {
 	Guess = false, -- guess when stuck (risky)
 	Human = true, -- walking style: randomized route and target
 	Flagging = true,
-	AutoToken = true,
+	AutoToken = false, -- off by default: a wrong token is sent to the server
 	PassFlags = true, -- allow walking over flagged blocks (shorter routes)
 	FlagRange = 12, -- stud
 	Delay = 0.15,
@@ -955,31 +955,30 @@ local function shown(g)
 	return g:IsDescendantOf(PlayerGui) and g.AbsoluteSize.X > 0 and g.AbsoluteSize.Y > 0
 end
 
--- all text of the prompt that contains this Yes button (the container that also has a "No")
+-- visible text of the prompt that holds this Yes button: the highest ancestor that contains only this Yes button
 local function promptText(btn)
-	local function collect(node)
-		local t = {}
+	local top, node = btn.Parent, btn.Parent
+	while node and node:IsA("GuiObject") do
+		local count = 0
 		for _, d in ipairs(node:GetDescendants()) do
-			if d:IsA("TextLabel") or d:IsA("TextButton") then
+			if yesTarget(d) then
+				count += 1
+			end
+		end
+		if count > 1 then
+			break
+		end
+		top, node = node, node.Parent
+	end
+	local t = {}
+	if top then
+		for _, d in ipairs(top:GetDescendants()) do
+			if (d:IsA("TextLabel") or d:IsA("TextButton")) and shown(d) then
 				t[#t + 1] = d.Text
 			end
 		end
-		return table.concat(t, " "):lower()
 	end
-	local node = btn.Parent
-	for _ = 1, 5 do
-		if not node or not node:IsA("GuiObject") then
-			break
-		end
-		for _, d in ipairs(node:GetDescendants()) do
-			if (d:IsA("TextButton") or d:IsA("TextLabel")) and trim(d.Text):lower() == "no" then
-				return collect(node)
-			end
-		end
-		node = node.Parent
-	end
-	local fallback = btn.Parent and (btn.Parent.Parent or btn.Parent)
-	return fallback and collect(fallback) or ""
+	return table.concat(t, " "):lower()
 end
 
 local function signalClick(btn)
@@ -1017,22 +1016,24 @@ local function realClick(btn)
 	end)
 end
 
--- press Yes: signal first, then a real click, retried until the prompt changes ("You can't back out now.")
-local function pressYes(btn)
+-- press Yes: signal and real click alternate every 0.05s until the prompt changes ("You can't back out now.")
+local function pressYes(btn, kind)
 	local hasSignal = (firesignal or getconnections) ~= nil
-	for i = 1, 4 do
+	for i = 1, 8 do
 		if not btn.Parent or not shown(btn) then
 			return true
 		end
 		if promptText(btn):find("back out", 1, true) then
 			return true
 		end
-		if hasSignal and i % 2 == 1 then
+		local viaSignal = hasSignal and i % 2 == 1
+		push(("  %s attempt %d via %s"):format(kind, i, viaSignal and "signal" or "real click"))
+		if viaSignal then
 			signalClick(btn)
 		else
 			realClick(btn)
 		end
-		task.wait(0.12)
+		task.wait(0.05)
 	end
 	return false
 end
@@ -1049,19 +1050,30 @@ local function promptMatches(kind, txt)
 	return ek ~= "" and txt:find(ek, 1, true) ~= nil and not hasSecret
 end
 
+local seenAt = {} -- btn -> time the matching prompt was first seen
 local function eventLoop(flag, kind, interval)
 	while F[flag] do
 		for btn in pairs(yesBtns) do
 			if not btn.Parent then
 				yesBtns[btn] = nil
-			elseif not F.pressing and shown(btn) then
+				seenAt[btn] = nil
+			elseif shown(btn) then
 				local txt = promptText(btn)
 				if promptMatches(kind, txt) and not txt:find("back out", 1, true) then
-					F.pressing = true
-					local ok = pressYes(btn)
-					F.pressing = false
-					setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " vote failed, retrying"))
+					if not seenAt[btn] then
+						seenAt[btn] = os.clock()
+						push(("[%s] VOTE %s prompt seen: %q"):format(os.date("%H:%M:%S"), kind, txt:sub(1, 100)))
+					end
+					if not F.pressing then
+						F.pressing = true
+						local ok = pressYes(btn, kind)
+						F.pressing = false
+						push(("[%s] VOTE %s %s after %.2fs"):format(os.date("%H:%M:%S"), kind, ok and "sent" or "failed", os.clock() - seenAt[btn]))
+						setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " vote failed, retrying"))
+					end
 				end
+			else
+				seenAt[btn] = nil
 			end
 		end
 		task.wait(interval)
@@ -1115,7 +1127,7 @@ end)
 FS.CreateSlider({ Title = "Flag range (studs)", Min = 5, Max = 40, Default = 12 }, function(v)
 	F.FlagRange = v
 end)
-FS.CreateToggle({ Title = "Auto find token", Desc = "Tries up to 3 candidates on 1 certain mine", Default = true }, function(v)
+FS.CreateToggle({ Title = "Auto find token", Desc = "Tries up to 3 candidates on 1 certain mine", Default = false }, function(v)
 	F.AutoToken = v
 end)
 FS.CreateToggle({ Title = "Walk over flags", Desc = "Walk on flagged blocks for shorter routes", Default = true }, function(v)
@@ -1133,7 +1145,7 @@ lblEvent = EV.CreateLabel("Event: idle")
 EV.CreateToggle({ Title = "Auto join event", Desc = 'Presses "Yes" on the event round vote', Default = false }, function(v)
 	F.AutoEvent = v
 	if v then
-		task.spawn(eventLoop, "AutoEvent", "event", 0.25)
+		task.spawn(eventLoop, "AutoEvent", "event", 0.05)
 	end
 end)
 EV.CreateToggle({ Title = "Auto join secret event", Desc = 'Spams "Yes" until the secret event vote shows up', Default = false }, function(v)
