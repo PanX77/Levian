@@ -34,7 +34,7 @@ local F = {
 	Guess = false, -- guess when stuck (risky)
 	Human = true, -- walking style: randomized route and target
 	Flagging = true,
-	AutoToken = false, -- off by default: a wrong token is sent to the server
+	AutoToken = true, -- read the real token from the game (needs filtergc); never guesses
 	PassFlags = true, -- allow walking over flagged blocks (shorter routes)
 	FlagRange = 12, -- stud
 	Delay = 0.15,
@@ -53,20 +53,26 @@ local F = {
 	-- dodge spike
 	Dodge = false, -- master switch
 	DodgeMove = true, -- step off hazardous cells
-	DodgeJump = true, -- jump when the area is crowded
+	DodgeJump = true, -- jump when stepping off is not possible / the area is crowded
 	SpikeRadius = 12, -- studs: the "area" around the player
-	SpikeCount = 4, -- hazardous cells in the area that count as crowded
-	SpikeCue = "Slash", -- which sound is the jump cue: "Slash" or "Warn"
-	SpikeCueRange = 7, -- studs: only cues from cells this close count
-	SpikeJumpDelay = 0, -- seconds after the cue
-	SpikeFallback = 0, -- seconds crowded without a cue before jumping anyway (0 = off)
+	SpikeCount = 10, -- hazardous cells in the area that count as crowded (jump instead of walking)
+	SpikeEta = 1.15, -- seconds from the warning to the spikes (measured from videos)
+	SpikeLead = 0.2, -- jump this many seconds before the spikes come out
+	SpikeMaxSteps = 2, -- only walk away if a safe cell is at most this many cells away
 	SpikeName = "Warn", -- name of the warning sound inside a cell
 	SpikeSound = "Slash", -- name of the spike sound inside a cell
 	dodging = false,
 	DodgeBusy = false,
 	dangerKeys = {}, -- cell keys that are hazardous right now
-	lastCue = 0,
 	lastJump = 0,
+	-- manual solver (ESP + auto-flag)
+	ManualSafe = true,
+	ManualBomb = true,
+	ManualHalf = true,
+	ManualSuggest = true,
+	ManualAuto = false,
+	ManualRadius = 20,
+	ManualDelay = 100,
 	settingsReady = false,
 }
 
@@ -75,7 +81,8 @@ local F = {
 local SETTINGS_KEYS = {
 	"Guess", "Human", "Flagging", "AutoToken", "PassFlags", "FlagRange", "Delay",
 	"AutoEvent", "AutoSecret", "EventKw", "SecretKw",
-	"Dodge", "DodgeMove", "DodgeJump", "SpikeRadius", "SpikeCount", "SpikeCue", "SpikeCueRange", "SpikeJumpDelay", "SpikeFallback", "SpikeName", "SpikeSound",
+	"Dodge", "DodgeMove", "DodgeJump", "SpikeRadius", "SpikeCount", "SpikeEta", "SpikeLead", "SpikeMaxSteps", "SpikeName", "SpikeSound",
+	"ManualSafe", "ManualBomb", "ManualHalf", "ManualSuggest", "ManualRadius", "ManualDelay",
 }
 local SETTINGS_FILE = "Levian Hub/" .. LP.Name .. "-minesweeper.json"
 local saveGen = 0
@@ -192,8 +199,42 @@ local function isTokenLike(v)
 	return type(v) == "string" and #v >= 20 and #v <= 40 and v:match("^%d+$") ~= nil
 end
 
--- collect long digit strings from: incoming remotes, Values/attributes, and client script memory
-local function collectTokens()
+-- the real flag token: an upvalue of the game's own ReplicatedFirst.MouseControl closure that references "PlaceFlag"
+-- (needs filtergc; same technique as the open-source solver)
+local function findFlagToken()
+	if not filtergc then
+		return nil
+	end
+	local ok, closures = pcall(filtergc, "function", { Constants = { "PlaceFlag" }, IgnoreExecutor = true }, false)
+	if not ok or type(closures) ~= "table" then
+		return nil
+	end
+	for _, closure in ipairs(closures) do
+		local okS, src = pcall(debug.info, closure, "s")
+		if okS and type(src) == "string" and src:find("ReplicatedFirst.MouseControl", 1, true) then
+			local okU, ups = pcall(debug.getupvalues, closure)
+			if okU and type(ups) == "table" then
+				for _, v in pairs(ups) do
+					if type(v) == "string" and v:match("^%d+$") then
+						return v
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- candidates for the flag token. exactOnly = only the MouseControl upvalue (safe to use automatically);
+-- otherwise also long digit strings from incoming remotes, Values/attributes and client memory (guesses)
+local function collectTokens(exactOnly)
+	local exact = findFlagToken()
+	if exact then
+		return { { v = exact, where = "ReplicatedFirst.MouseControl upvalue" } }
+	end
+	if exactOnly then
+		return {}
+	end
 	local out, seen = {}, {}
 	local function add(v, where)
 		if isTokenLike(v) and not seen[v] then
@@ -225,37 +266,6 @@ local function collectTokens()
 				end
 				for _, v in pairs(d:GetAttributes()) do
 					add(v, "attribute " .. path(d))
-				end
-			end
-		end)
-	end
-	if getgc then
-		pcall(function()
-			for i, o in ipairs(getgc(true)) do
-				if i % 2000 == 0 then
-					task.wait()
-				end
-				local t = type(o)
-				if t == "table" then
-					pcall(function()
-						for _, v in next, o do
-							add(v, "memory (table)")
-						end
-					end)
-				elseif t == "function" and debug and debug.getupvalues then
-					pcall(function()
-						if islclosure and not islclosure(o) then
-							return
-						end
-						for _, uv in pairs(debug.getupvalues(o)) do
-							add(uv, "memory (upvalue)")
-						end
-						if debug.getconstants then
-							for _, c in pairs(debug.getconstants(o)) do
-								add(c, "memory (constant)")
-							end
-						end
-					end)
 				end
 			end
 		end)
@@ -372,6 +382,31 @@ local function readNumber(gui)
 end
 
 -- state: flag (has a flag Model) | num (has a NumberGui) | unk (brown color) | zero (opened, no number)
+-- classify one board part: flag (has a flag Model / flag color) | num (NumberGui) | unk (brown) | zero | pending
+local function makeCell(p)
+	local x = math.floor(p.Position.X / F.CellSize + 0.5)
+	local z = math.floor(p.Position.Z / F.CellSize + 0.5)
+	local c = { part = p, x = x, z = z, key = ckey(x, z) }
+	local gui = p:FindFirstChild("NumberGui")
+	if flagged(p) then
+		c.state = "flag"
+	elseif gui then
+		c.state = "num"
+		c.n = readNumber(gui)
+	elseif near(p.Color, BROWN[1]) or near(p.Color, BROWN[2]) then
+		c.state = "unk"
+	else
+		c.state = "zero"
+	end
+	if c.state == "unk" then
+		local t = F.firedAt[c.key]
+		if t and os.clock() - t < 6 then
+			c.state = "pending" -- flag fired, not visible yet: counts as a mine, never walkable
+		end
+	end
+	return c
+end
+
 local function buildBoard()
 	local f = workspace:FindFirstChild("Flag")
 	local parts = f and f:FindFirstChild("Parts")
@@ -381,26 +416,7 @@ local function buildBoard()
 	local B = { cells = {}, list = {} }
 	for _, p in ipairs(parts:GetChildren()) do
 		if p:IsA("BasePart") then
-			local x = math.floor(p.Position.X / F.CellSize + 0.5)
-			local z = math.floor(p.Position.Z / F.CellSize + 0.5)
-			local c = { part = p, x = x, z = z, key = ckey(x, z) }
-			local gui = p:FindFirstChild("NumberGui")
-			if flagged(p) then
-				c.state = "flag"
-			elseif gui then
-				c.state = "num"
-				c.n = readNumber(gui)
-			elseif near(p.Color, BROWN[1]) or near(p.Color, BROWN[2]) then
-				c.state = "unk"
-			else
-				c.state = "zero"
-			end
-			if c.state == "unk" then
-				local t = F.firedAt[c.key]
-				if t and os.clock() - t < 6 then
-					c.state = "pending" -- flag fired, not visible yet: counts as a mine, never walkable
-				end
-			end
+			local c = makeCell(p)
 			B.cells[c.key] = c
 			B.list[#B.list + 1] = c
 		end
@@ -785,8 +801,8 @@ local function guessTarget(B, cons, reduce, mineK)
 	return best, bestp
 end
 
--- try automatic tokens on one certain mine; valid only if the flag actually appears
-local function tryAutoToken(B, mineK)
+-- try the flag token on one certain mine; valid only if the flag actually appears
+local function tryAutoToken(B, mineK, exactOnly)
 	local remote = getFlagRemote()
 	if not remote then
 		return false
@@ -801,7 +817,7 @@ local function tryAutoToken(B, mineK)
 	if not target then
 		return false
 	end
-	local cands = collectTokens()
+	local cands = collectTokens(exactOnly)
 	push(("AUTO TOKEN: %d candidates"):format(#cands))
 	for i = 1, math.min(#cands, 3) do
 		local tk = cands[i].v
@@ -947,7 +963,7 @@ local function farmLoop()
 		if F.Flagging and F.AutoToken and not flagTemplate and not F.autoTried and next(mineK) then
 			F.autoTried = true
 			fstatus("searching for the flag token automatically")
-			if not tryAutoToken(B, mineK) then
+			if not tryAutoToken(B, mineK, true) then
 				UI.CreateNoti({ Title = "Token", Desc = "Not found automatically. Place 1 flag manually.", ShowTime = 4 })
 			end
 		end
@@ -1115,11 +1131,12 @@ end
 
 -- cache of "Yes" buttons (TextButton, or a TextLabel inside a GuiButton), kept up to date by events
 local yesBtns = {}
+local YES_TEXT = { yes = true, join = true, accept = true }
 local function yesTarget(d)
-	if d:IsA("TextButton") and trim(d.Text):lower() == "yes" then
+	if d:IsA("TextButton") and YES_TEXT[trim(d.Text):lower()] then
 		return d
 	end
-	if d:IsA("TextLabel") and trim(d.Text):lower() == "yes" then
+	if d:IsA("TextLabel") and YES_TEXT[trim(d.Text):lower()] then
 		local p = d.Parent
 		if p and p:IsA("GuiButton") then
 			return p
@@ -1274,19 +1291,23 @@ local function promptMatches(kind, txt)
 	end
 	local sk, ek = F.SecretKw:lower(), F.EventKw:lower()
 	local hasSecret = sk ~= "" and txt:find(sk, 1, true) ~= nil
+	local hasEvent = ek ~= "" and txt:find(ek, 1, true) ~= nil
+	local isVote = txt:find("votes", 1, true) ~= nil
 	if kind == "secret" then
-		return hasSecret
+		-- the secret keyword, or any other vote prompt that is not the normal event vote
+		return hasSecret or (isVote and not hasEvent)
 	end
-	return ek ~= "" and txt:find(ek, 1, true) ~= nil and not hasSecret
+	return hasEvent and not hasSecret
 end
 
 local seenAt = {} -- btn -> time the matching prompt was first seen
 local done = {} -- btn -> true once the vote went through (reset when the prompt hides or restarts at 0)
+local ignored = {} -- btn -> last prompt text that was logged as ignored
 local function eventLoop(flag, kind, interval)
 	while F[flag] do
 		for btn in pairs(yesBtns) do
 			if not btn.Parent then
-				yesBtns[btn], seenAt[btn], done[btn] = nil, nil, nil
+				yesBtns[btn], seenAt[btn], done[btn], ignored[btn] = nil, nil, nil, nil
 			elseif shown(btn) then
 				local txt = promptText(btn)
 				if done[btn] and voteCount(txt) == 0 then
@@ -1307,9 +1328,13 @@ local function eventLoop(flag, kind, interval)
 						push(("[%s] VOTE %s %s after %.2fs"):format(os.date("%H:%M:%S"), kind, ok and "sent" or "still trying", os.clock() - seenAt[btn]))
 						setLabel(lblEvent, "Event: " .. kind .. (ok and " vote sent" or " still trying"))
 					end
+				elseif kind == "secret" and ignored[btn] ~= txt and not txt:find("kick", 1, true) then
+					-- log prompts the secret toggle did not take, so their text can be matched
+					ignored[btn] = txt
+					push(("[%s] VOTE secret ignored prompt: %q"):format(os.date("%H:%M:%S"), txt:sub(1, 120)))
 				end
 			else
-				seenAt[btn], done[btn] = nil, nil
+				seenAt[btn], done[btn], ignored[btn] = nil, nil, nil
 			end
 		end
 		task.wait(interval)
@@ -1339,12 +1364,13 @@ local function dumpVotes()
 end
 
 ---------------------------------------------------------------- DODGE SPIKE
--- Spikes live on the board cells: every cell part has "Warn" and "Slash" sounds (seen in the log dump).
--- A cell is hazardous while its Warn/Slash sound is playing (or it turns red). The bot steps off a hazardous
--- cell and, when many cells around you are hazardous, jumps on the Slash (or Warn) cue.
+-- Timing measured from gameplay videos: red warning appears -> spikes come out ~1.15s later (the red is only
+-- visible ~0.5s), and the spikes stay ~0.6s. Spikes sit on board cells: each cell part has "Warn" and "Slash"
+-- sounds. A "wave" starts when a Warn sound starts. For each wave the bot, if YOUR cell is hazardous:
+--   * steps to the nearest safe opened/flagged cell (if it is within "max steps" and the area is not crowded), or
+--   * jumps so that it is already in the air when the spikes come out (and jumps again if it lands on them).
 local lblSpike = nil
 local cellIndex, cellIndexAt = {}, -math.huge
-local wasSlash, wasWarn = {}, {}
 
 local function refreshIndex()
 	if os.clock() - cellIndexAt < 2 then
@@ -1374,39 +1400,45 @@ local function isRedColor(c)
 	return c.R > 0.75 and c.G < 0.3 and c.B < 0.3
 end
 
--- hazardous cells near pos: set of cell keys, how many are inside the area radius, and a fresh sound cue (cell key)
+-- hazardous cells near pos: set of cell keys, how many are inside the area radius,
+-- when the freshest Warn sound started (os.clock time), and whether any cell is red
 local function scanHazards(pos)
 	local warnName = F.SpikeName ~= "" and F.SpikeName or "Warn"
 	local slashName = F.SpikeSound ~= "" and F.SpikeSound or "Slash"
-	local reach2, area2, cue2 = (F.SpikeRadius + 4) ^ 2, F.SpikeRadius ^ 2, F.SpikeCueRange ^ 2
-	local danger, count, cue = {}, 0, nil
+	local reach2, area2 = (F.SpikeRadius + 4) ^ 2, F.SpikeRadius ^ 2
+	local danger, count, freshStart, anyRed = {}, 0, nil, false
+	local now = os.clock()
 	for _, e in ipairs(cellIndex) do
 		local dx, dz = e.x - pos.X, e.z - pos.Z
 		local d2 = dx * dx + dz * dz
 		if d2 <= reach2 then
 			local p = e.part
 			local w, sl = p:FindFirstChild(warnName), p:FindFirstChild(slashName)
-			local warning = (w and w:IsA("Sound") and w.IsPlaying) or false
-			local slashing = (sl and sl:IsA("Sound") and sl.IsPlaying) or false
-			if warning or slashing or isRedColor(p.Color) then
+			local warning = w ~= nil and w:IsA("Sound") and w.IsPlaying
+			local slashing = sl ~= nil and sl:IsA("Sound") and sl.IsPlaying
+			local red = isRedColor(p.Color)
+			if warning or slashing or red then
 				danger[e.key] = true
 				if d2 <= area2 then
 					count += 1
 				end
 			end
-			local fresh = (F.SpikeCue == "Warn" and warning and not wasWarn[e.key])
-				or (F.SpikeCue ~= "Warn" and slashing and not wasSlash[e.key])
-			if fresh and d2 <= cue2 then
-				cue = cue or e.key
+			if red then
+				anyRed = true
 			end
-			wasSlash[e.key], wasWarn[e.key] = slashing, warning
+			if warning and w.TimePosition < 0.4 then
+				local started = now - w.TimePosition
+				if not freshStart or started < freshStart then
+					freshStart = started
+				end
+			end
 		end
 	end
-	return danger, count, cue
+	return danger, count, freshStart, anyRed
 end
 
 local function jump(reason)
-	if os.clock() - F.lastJump < 0.6 then
+	if os.clock() - F.lastJump < 0.45 then
 		return
 	end
 	local char = LP.Character
@@ -1419,6 +1451,24 @@ local function jump(reason)
 		hum.Jump = true
 		push(("[%s] SPIKE jump (%s)"):format(os.date("%H:%M:%S"), reason))
 	end
+end
+
+-- only the cells around the avatar, classified like the board (fast: no full board scan)
+local function nearBoard(pos, radius, danger)
+	local B = { cells = {}, list = {} }
+	local r2 = radius * radius
+	for _, e in ipairs(cellIndex) do
+		local dx, dz = e.x - pos.X, e.z - pos.Z
+		if dx * dx + dz * dz <= r2 then
+			local c = makeCell(e.part)
+			if danger[c.key] then
+				c.danger = true
+			end
+			B.cells[c.key] = c
+			B.list[#B.list + 1] = c
+		end
+	end
+	return B
 end
 
 -- nearest cell (through opened/flagged cells) that is not hazardous
@@ -1447,24 +1497,29 @@ local function escapePath(B, from)
 	return nil
 end
 
-local function dodgeWalk(cell)
+-- walk the escape path without stopping at every cell center (straight stretches switch waypoint early)
+local function dodgeRun(path2)
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if not hum or not hrp then
-		return false
+		return
 	end
-	local tx, tz = cell.part.Position.X, cell.part.Position.Z
-	local t0 = os.clock()
-	while F.Dodge and os.clock() - t0 < 1.5 do
-		hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
-		local dx, dz = hrp.Position.X - tx, hrp.Position.Z - tz
-		if math.sqrt(dx * dx + dz * dz) < 1.2 then
-			return true
+	for i = 2, #path2 do
+		local c0, p0, nxt = path2[i], path2[i - 1], path2[i + 1]
+		local straight = nxt ~= nil and (nxt.x - c0.x == c0.x - p0.x) and (nxt.z - c0.z == c0.z - p0.z)
+		local thr = straight and 2.2 or 1.3
+		local tx, tz = c0.part.Position.X, c0.part.Position.Z
+		local t0 = os.clock()
+		while F.Dodge and os.clock() - t0 < 1.0 do
+			hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
+			local dx, dz = hrp.Position.X - tx, hrp.Position.Z - tz
+			if math.sqrt(dx * dx + dz * dz) < thr then
+				break
+			end
+			task.wait()
 		end
-		task.wait(0.03)
 	end
-	return false
 end
 
 local function dodgeLoop()
@@ -1472,20 +1527,31 @@ local function dodgeLoop()
 		return
 	end
 	F.DodgeBusy = true
-	local denseSince, lastLog, lastText = nil, 0, ""
+	local wave, lastText = nil, ""
 	while F.Dodge do
-		task.wait(0.05)
+		task.wait()
 		local char = LP.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		if not hum or not hrp or hum.Health <= 0 then
-			F.dangerKeys, denseSince = {}, nil
+			F.dangerKeys, wave = {}, nil
 			continue
 		end
 		refreshIndex()
 		local pos = hrp.Position
-		local danger, count, cue = scanHazards(pos)
-		F.dangerKeys = danger -- buildBoard marks these cells as danger (routes avoid them)
+		local now = os.clock()
+		local danger, count, freshStart, anyRed = scanHazards(pos)
+		F.dangerKeys = danger -- buildBoard marks these cells as danger (farm routes avoid them)
+
+		-- a new wave: a Warn sound just started (or, without sounds, red cells showed up)
+		if freshStart then
+			if not wave or freshStart - wave.start > 0.8 then
+				wave = { start = freshStart, seen = now, handled = false, rejumps = 0 }
+			end
+		elseif anyRed and (not wave or now - wave.start > 2) then
+			wave = { start = now, seen = now, handled = false, rejumps = 0 }
+		end
+
 		local ownKey = ckey(math.floor(pos.X / F.CellSize + 0.5), math.floor(pos.Z / F.CellSize + 0.5))
 		local underMe = danger[ownKey] == true
 		local text = ("Spikes: %d cells in area%s"):format(count, underMe and " (your cell!)" or "")
@@ -1494,46 +1560,40 @@ local function dodgeLoop()
 			setLabel(lblSpike, text)
 		end
 
-		-- crowded area: jump on the sound cue (or after the fallback time if no cue came)
-		if F.DodgeJump and count >= F.SpikeCount then
-			denseSince = denseSince or os.clock()
-			if os.clock() - lastLog > 1 then
-				lastLog = os.clock()
-				push(("[%s] SPIKE crowded: %d hazardous cells within %.0f studs"):format(os.date("%H:%M:%S"), count, F.SpikeRadius))
-			end
-			if cue then
-				F.lastCue = os.clock()
-				push(("[%s] SPIKE cue (%s) at %s -> jump in %.2fs"):format(os.date("%H:%M:%S"), F.SpikeCue, cue, F.SpikeJumpDelay))
-				task.delay(F.SpikeJumpDelay, function()
-					jump("cue")
-				end)
-			elseif F.SpikeFallback > 0 and os.clock() - denseSince >= F.SpikeFallback and F.lastCue < denseSince then
-				jump("fallback")
-				denseSince = os.clock()
-			end
-		else
-			denseSince = nil
-		end
-
-		-- your cell is hazardous: step to the nearest safe opened/flagged cell
-		if F.DodgeMove and underMe and not F.dodging then
-			local B = buildBoard()
-			local cur = B and curCell(B)
-			if cur and standable(cur) then
-				local path2 = escapePath(B, cur)
-				if path2 and #path2 >= 2 then
+		if wave and not wave.handled and now - wave.seen >= 0.06 then
+			wave.handled = true
+			wave.spikeAt = wave.start + F.SpikeEta
+			if underMe then
+				local B = nearBoard(pos, 22, danger)
+				local cur = B.cells[ownKey]
+				local crowded = count >= F.SpikeCount
+				local path2 = (F.DodgeMove and not crowded and cur and standable(cur)) and escapePath(B, cur) or nil
+				if path2 and #path2 - 1 <= F.SpikeMaxSteps then
 					F.dodging, F.abort = true, true -- pause the farm loop while we move
-					push(("[%s] SPIKE dodge: %s -> %s"):format(os.date("%H:%M:%S"), cur.key, path2[#path2].key))
-					for i = 2, #path2 do
-						if not dodgeWalk(path2[i]) then
-							break
-						end
-					end
+					push(("[%s] SPIKE dodge: %s -> %s (%.2fs before spikes)"):format(
+						os.date("%H:%M:%S"), cur.key, path2[#path2].key, wave.spikeAt - now
+					))
+					dodgeRun(path2)
 					stopWalking()
 					F.dodging = false
 				elseif F.DodgeJump then
-					jump("no safe cell to step to")
+					wave.jumpAt = wave.spikeAt - F.SpikeLead
+					push(("[%s] SPIKE %s: jump in %.2fs (spikes in %.2fs)"):format(
+						os.date("%H:%M:%S"), crowded and "crowded" or "no safe cell close", math.max(0, wave.jumpAt - now), wave.spikeAt - now
+					))
 				end
+			end
+		end
+
+		-- planned jump, and a second jump if we land while the spikes are still out
+		if wave and wave.jumpAt then
+			if now >= wave.jumpAt and not wave.jumped then
+				wave.jumped = true
+				jump("airborne when the spikes come out")
+			elseif wave.jumped and underMe and wave.rejumps < 2 and now < wave.spikeAt + 0.7
+				and hum.FloorMaterial ~= Enum.Material.Air then
+				wave.rejumps += 1
+				jump("landed on spikes, jump again")
 			end
 		end
 	end
@@ -1551,14 +1611,15 @@ local function dumpSpikes()
 	cellIndexAt = -math.huge
 	refreshIndex()
 	local pos = hrp.Position
-	local danger, count = scanHazards(pos)
+	local danger, count, freshStart, anyRed = scanHazards(pos)
 	local ownKey = ckey(math.floor(pos.X / F.CellSize + 0.5), math.floor(pos.Z / F.CellSize + 0.5))
 	local n = 0
 	for _ in pairs(danger) do
 		n += 1
 	end
-	push(("[%s] SPIKES: %d hazardous cells near (%d in area radius), your cell %s%s"):format(
-		os.date("%H:%M:%S"), n, count, ownKey, danger[ownKey] and " IS HAZARDOUS" or ""
+	push(("[%s] SPIKES: %d hazardous cells near (%d in area radius), your cell %s%s, fresh warn %s, red cells %s"):format(
+		os.date("%H:%M:%S"), n, count, ownKey, danger[ownKey] and " IS HAZARDOUS" or "",
+		freshStart and ("%.2fs ago"):format(os.clock() - freshStart) or "none", tostring(anyRed)
 	))
 	local shown = 0
 	for key in pairs(danger) do
@@ -1576,6 +1637,544 @@ local function dumpSpikes()
 			end
 			break
 		end
+	end
+end
+
+---------------------------------------------------------------- MANUAL (solver ESP + auto-flag)
+-- Ported from the open-source bLockerman's Minesweeper solver (scriptblox) and adapted to this UI.
+-- Exact deductions first, then exhaustive enumeration of every frontier group to get mine probabilities.
+local Teams = game:GetService("Teams")
+local startManual, stopManual, resetManualToken
+local lblMBoard, lblMNext, lblMFlag
+
+do
+	local function solveClues(clues)
+		local known = {}
+		local changed = true
+		while changed do
+			changed = false
+			local residuals, byTile = {}, {}
+			for _, clue in ipairs(clues) do
+				local need, remaining = clue.count, {}
+				for _, id in ipairs(clue.ids) do
+					if known[id] == nil then
+						remaining[id] = true
+					else
+						need -= known[id]
+					end
+				end
+				local count = 0
+				for _ in pairs(remaining) do
+					count += 1
+				end
+				if need < 0 or need > count then
+					return {}, false
+				end
+				if count > 0 and (need == 0 or need == count) then
+					local value = if need == 0 then 0 else 1
+					for id in pairs(remaining) do
+						known[id] = value
+					end
+					changed = true
+				elseif count > 0 then
+					local residual = { ids = remaining, count = count, need = need }
+					table.insert(residuals, residual)
+					for id in pairs(remaining) do
+						byTile[id] = byTile[id] or {}
+						table.insert(byTile[id], residual)
+					end
+				end
+			end
+
+			if not changed then
+				for _, small in ipairs(residuals) do
+					local first = next(small.ids)
+					for _, large in ipairs(byTile[first]) do
+						if small == large or small.count > large.count then
+							continue
+						end
+						local subset = true
+						for id in pairs(small.ids) do
+							if not large.ids[id] then
+								subset = false
+								break
+							end
+						end
+						if not subset then
+							continue
+						end
+						local need = large.need - small.need
+						local extra = large.count - small.count
+						if need < 0 or need > extra then
+							return {}, false
+						end
+						if extra > 0 and (need == 0 or need == extra) then
+							for id in pairs(large.ids) do
+								if not small.ids[id] then
+									known[id] = if need == 0 then 0 else 1
+								end
+							end
+							changed = true
+							break
+						end
+					end
+					if changed then
+						break
+					end
+				end
+			end
+		end
+
+		local frontier = {}
+		for _, clue in ipairs(clues) do
+			local edge = { ids = {}, need = clue.count, used = 0, left = 0 }
+			for _, id in ipairs(clue.ids) do
+				if known[id] == nil then
+					table.insert(edge.ids, id)
+					frontier[id] = frontier[id] or {}
+					table.insert(frontier[id], edge)
+				else
+					edge.need -= known[id]
+				end
+			end
+			edge.left = #edge.ids
+		end
+
+		local visited, budget = {}, 180000
+		local stopAt = os.clock() + 0.035
+		for first in pairs(frontier) do
+			if visited[first] then
+				continue
+			end
+			local ids, seenEdges = { first }, {}
+			visited[first] = true
+			local cursor = 1
+			while cursor <= #ids do
+				for _, edge in ipairs(frontier[ids[cursor]]) do
+					if seenEdges[edge] then
+						continue
+					end
+					seenEdges[edge] = true
+					for _, id in ipairs(edge.ids) do
+						if not visited[id] then
+							visited[id] = true
+							table.insert(ids, id)
+						end
+					end
+				end
+				cursor += 1
+			end
+			if #ids > 64 or budget <= 0 or os.clock() >= stopAt then
+				continue
+			end
+
+			local linked, used = {}, {}
+			local ordered = {}
+			for _ = 1, #ids do
+				local best, bestScore
+				for _, id in ipairs(ids) do
+					if used[id] then
+						continue
+					end
+					local score = (linked[id] or 0) * 100 + #frontier[id]
+					if not bestScore or score > bestScore then
+						best, bestScore = id, score
+					end
+				end
+				used[best] = true
+				table.insert(ordered, best)
+				for _, edge in ipairs(frontier[best]) do
+					for _, id in ipairs(edge.ids) do
+						if not used[id] then
+							linked[id] = (linked[id] or 0) + 1
+						end
+					end
+				end
+			end
+			ids = ordered
+			local assignments, mineCounts, solutions = {}, {}, 0
+			local componentBudget = math.min(70000, budget)
+			local function enumerate(index)
+				if componentBudget <= 0 or (componentBudget % 256 == 0 and os.clock() >= stopAt) then
+					return false
+				end
+				budget -= 1
+				componentBudget -= 1
+				if index > #ids then
+					solutions += 1
+					for i, value in ipairs(assignments) do
+						mineCounts[i] = (mineCounts[i] or 0) + value
+					end
+					return true
+				end
+				local adjacent = frontier[ids[index]]
+				for value = 0, 1 do
+					local valid = true
+					for _, edge in ipairs(adjacent) do
+						edge.left -= 1
+						edge.used += value
+						if edge.used > edge.need or edge.used + edge.left < edge.need then
+							valid = false
+						end
+					end
+					local complete = true
+					if valid then
+						assignments[index] = value
+						complete = enumerate(index + 1)
+					end
+					for _, edge in ipairs(adjacent) do
+						edge.left += 1
+						edge.used -= value
+					end
+					if not complete then
+						return false
+					end
+				end
+				return true
+			end
+			if not enumerate(1) then
+				continue
+			end
+			if solutions == 0 then
+				return {}, false
+			end
+			for i, id in ipairs(ids) do
+				known[id] = (mineCounts[i] or 0) / solutions
+			end
+		end
+		return known, true
+	end
+
+	local M = { alive = false, flagsPlaced = 0, markers = {} }
+	local colors = {
+		safe = Color3.fromRGB(64, 236, 117),
+		bomb = Color3.fromRGB(255, 70, 85),
+		half = Color3.fromRGB(255, 208, 66),
+		suggest = Color3.fromRGB(79, 180, 255),
+	}
+	local lastText = { "", "", "" }
+	local function put(i, lbl, text)
+		if lastText[i] ~= text then
+			lastText[i] = text
+			setLabel(lbl, text)
+		end
+	end
+
+	-- one tile: its clue number (0..8) or nil when unopened/flagged, and whether it carries a flag
+	local function readTile(part)
+		local gui = part:FindFirstChild("NumberGui")
+		if not gui then
+			return nil, part:FindFirstChildWhichIsA("Model") ~= nil
+		end
+		local label = gui:FindFirstChild("TextLabel")
+		if not label or not label:IsA("TextLabel") then
+			return nil, true
+		end
+		local value = label.Text
+		if value == "X" then
+			return nil, true
+		end
+		if value == "" then
+			return 0, false
+		end
+		local clue = tonumber(value)
+		if clue and clue >= 0 and clue <= 8 and clue % 1 == 0 then
+			return clue, false
+		end
+		return nil, true
+	end
+
+	local function tileId(x, z)
+		return tostring(x) .. "," .. tostring(z)
+	end
+
+	local function readBoard(parts)
+		local tiles, occupied = {}, 0
+		for _, part in ipairs(parts:GetChildren()) do
+			if not part:IsA("BasePart") then
+				continue
+			end
+			local x = math.round(part.Position.X / part.Size.X)
+			local z = math.round(part.Position.Z / part.Size.Z)
+			local number, flagged2 = readTile(part)
+			tiles[tileId(x, z)] = { part = part, x = x, z = z, number = number, flagged = flagged2 }
+			occupied += 1
+		end
+		return tiles, occupied
+	end
+
+	local cachedTiles, cachedCount, cachedParts, cachedMarks, cachedValid, cachedClueCount
+
+	local function solveBoard(parts, tiles, occupied)
+		local unchanged = cachedParts == parts and cachedCount == occupied
+		if unchanged then
+			for id, tile in pairs(tiles) do
+				local old = cachedTiles[id]
+				if not old or old.part ~= tile.part or old.number ~= tile.number then
+					unchanged = false
+					break
+				end
+			end
+		end
+		if unchanged then
+			return cachedMarks, cachedValid, cachedClueCount
+		end
+		local clues = {}
+		for _, tile in pairs(tiles) do
+			if tile.number == nil then
+				continue
+			end
+			local ids = {}
+			for dx = -1, 1 do
+				for dz = -1, 1 do
+					local id = tileId(tile.x + dx, tile.z + dz)
+					local neighbor = tiles[id]
+					if neighbor and neighbor.number == nil then
+						table.insert(ids, id)
+					end
+				end
+			end
+			table.insert(clues, { ids = ids, count = tile.number })
+		end
+		local marks, valid = solveClues(clues)
+		cachedParts, cachedTiles, cachedCount = parts, tiles, occupied
+		cachedMarks, cachedValid, cachedClueCount = marks, valid, #clues
+		return marks, valid, #clues
+	end
+
+	-- the flag token comes straight from the game (see findFlagToken)
+	local requestArgument
+	local nextLookup = 0
+	local function getFlagArgument()
+		if requestArgument then
+			return requestArgument
+		end
+		if os.clock() < nextLookup then
+			return nil
+		end
+		nextLookup = os.clock() + 5
+		requestArgument = findFlagToken()
+		return requestArgument
+	end
+	resetManualToken = function()
+		requestArgument, nextLookup = nil, 0
+	end
+
+	local attempts = setmetatable({}, { __mode = "k" })
+	local pending
+	local lastFlagAt = -math.huge
+
+	local function showMarker(tile, key, active)
+		local part = tile.part
+		local marker = M.markers[part]
+		if not marker then
+			marker = Instance.new("BoxHandleAdornment")
+			marker.Adornee = part
+			marker.Size = Vector3.new(part.Size.X * 0.92, 0.08, part.Size.Z * 0.92)
+			marker.CFrame = CFrame.new(0, part.Size.Y / 2 + 0.08, 0)
+			marker.ZIndex = 3
+			marker.AlwaysOnTop = true
+			marker.Parent = M.overlay
+			M.markers[part] = marker
+		end
+		marker.Color3 = colors[key]
+		marker.Transparency = if key == "safe" and tile.flagged then 0.18 else 0.38
+		active[part] = true
+	end
+
+	local function update()
+		local board = workspace:FindFirstChild("Flag")
+		local parts = board and board:FindFirstChild("Parts")
+		if not parts then
+			for _, marker in pairs(M.markers) do
+				marker:Destroy()
+			end
+			table.clear(M.markers)
+			M.route.Enabled = false
+			put(1, lblMBoard, "Waiting for the board")
+			return
+		end
+		local tiles, count = readBoard(parts)
+		local marks, valid, clueCount = solveBoard(parts, tiles, count)
+		local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+		local info = ReplicatedStorage:FindFirstChild("Info")
+		local flagless = info and info:FindFirstChild("Flagless")
+		local playing = LP.Team ~= nil and LP.Team == Teams:FindFirstChild("Playing")
+		local eligible = playing and root and not (flagless and flagless:IsA("BoolValue") and flagless.Value)
+		local now = os.clock()
+		local counts = { safe = 0, bomb = 0, half = 0 }
+		local active = {}
+		local candidate, bestDistance
+
+		if pending then
+			local _, isFlagged = readTile(pending.part)
+			if pending.part.Parent == parts and isFlagged then
+				M.flagsPlaced += 1
+				pending = nil
+			elseif pending.part.Parent ~= parts or now >= pending.deadline then
+				pending = nil
+			end
+		end
+		local openableSafe, flaggedSafe = 0, 0
+		local guess, guessRisk, guessDistance
+		local nearestSafe, safeDistance, nearestFlaggedSafe, flaggedSafeDistance
+		local position = root and root.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
+
+		for id, tile in pairs(tiles) do
+			if tile.number ~= nil then
+				continue
+			end
+			local risk = marks[id]
+			local key = if risk == 0 then "safe" elseif risk == 1 then "bomb" elseif risk == 0.5 then "half" else nil
+			if key then
+				counts[key] += 1
+			end
+			if key == "safe" then
+				local distance = position and (position - tile.part.Position).Magnitude
+				if tile.flagged then
+					flaggedSafe += 1
+					if distance and (not flaggedSafeDistance or distance < flaggedSafeDistance) then
+						nearestFlaggedSafe, flaggedSafeDistance = tile, distance
+					end
+				else
+					openableSafe += 1
+					if distance and (not safeDistance or distance < safeDistance) then
+						nearestSafe, safeDistance = tile, distance
+					end
+				end
+			end
+			local show = (key == "safe" and F.ManualSafe) or (key == "bomb" and F.ManualBomb) or (key == "half" and F.ManualHalf)
+			if key and show and (not tile.flagged or key == "safe") then
+				showMarker(tile, key, active)
+			end
+			if tile.flagged or not position then
+				continue
+			end
+
+			local distance = (position - tile.part.Position).Magnitude
+			if key == "bomb" and eligible and not attempts[tile.part] then
+				if distance <= F.ManualRadius and (not bestDistance or distance < bestDistance) then
+					candidate, bestDistance = tile.part, distance
+				end
+			elseif risk ~= 0 and risk ~= 1 and F.ManualSuggest and valid and clueCount > 0 then
+				local score = risk or math.huge
+				local bestScore = guessRisk or math.huge
+				if not guess or score < bestScore or (score == bestScore and distance < guessDistance) then
+					guess, guessRisk, guessDistance = tile, risk, distance
+				end
+			end
+		end
+
+		local nextMove = ""
+		local routeTile, routeText, routeColor
+		if valid and count == 0 then
+			nextMove = "Waiting for tiles"
+		elseif valid and clueCount == 0 then
+			nextMove = "Open a tile to start solving"
+		elseif valid and nearestSafe and F.ManualSafe then
+			routeTile, routeText, routeColor = nearestSafe, "SAFE", colors.safe
+			nextMove = ("Nearest safe tile: %.0f studs"):format(safeDistance)
+		elseif valid and openableSafe == 0 then
+			if flaggedSafe > 0 then
+				if nearestFlaggedSafe and F.ManualSafe then
+					routeTile, routeText, routeColor = nearestFlaggedSafe, "UNFLAG", colors.safe
+				end
+				nextMove = ("Unflag a green tile (%d flagged)"):format(flaggedSafe)
+			elseif guess then
+				showMarker(guess, "suggest", active)
+				routeTile, routeText, routeColor = guess, "GUESS", colors.suggest
+				nextMove = if guessRisk then ("Blue guess: %.0f%% mine risk"):format(guessRisk * 100) else "Blue guess: risk unknown"
+			else
+				nextMove = "No proven safe move"
+			end
+		end
+		M.route.Enabled = routeTile ~= nil
+		M.route.Adornee = routeTile and routeTile.part or nil
+		if routeTile then
+			M.routeLabel.Text = routeText
+			M.routeLabel.TextColor3 = routeColor
+		end
+		for part, marker in pairs(M.markers) do
+			if not active[part] then
+				marker:Destroy()
+				M.markers[part] = nil
+			end
+		end
+
+		local flagStatus = "off"
+		local placeFlag = ReplicatedStorage:FindFirstChild("Events")
+		placeFlag = placeFlag and placeFlag:FindFirstChild("FlagEvents")
+		placeFlag = placeFlag and placeFlag:FindFirstChild("PlaceFlag")
+		if F.ManualAuto then
+			if F.Run then
+				flagStatus = "paused (Auto Farm is on, it flags by itself)"
+			elseif not eligible then
+				flagStatus = "waiting until you are playing"
+			elseif not placeFlag or not placeFlag:IsA("RemoteEvent") or not getFlagArgument() then
+				flagStatus = "flag control unavailable (needs filtergc)"
+			else
+				flagStatus = ("%d placed | %d studs | %d ms"):format(M.flagsPlaced, F.ManualRadius, F.ManualDelay)
+				if candidate and not pending and now - lastFlagAt >= F.ManualDelay / 1000 then
+					local number, isFlagged = readTile(candidate)
+					if candidate.Parent == parts and number == nil and not isFlagged then
+						attempts[candidate] = true
+						lastFlagAt = now
+						pending = { part = candidate, deadline = now + 1.5 }
+						placeFlag:FireServer(candidate, requestArgument, true)
+					end
+				end
+			end
+		end
+		put(1, lblMBoard, ("%d safe | %d mines | %d at 50/50"):format(counts.safe, counts.bomb, counts.half))
+		put(2, lblMNext, valid and nextMove or "Waiting for consistent clues")
+		put(3, lblMFlag, "Auto-flag: " .. flagStatus)
+	end
+
+	startManual = function()
+		if M.alive then
+			return
+		end
+		M.alive = true
+		M.overlay = Instance.new("Folder")
+		M.overlay.Name = "LevianMarkers"
+		M.overlay.Parent = workspace
+		M.route = Instance.new("BillboardGui")
+		M.route.Name = "NextTile"
+		M.route.Size = UDim2.fromOffset(100, 28)
+		M.route.StudsOffsetWorldSpace = Vector3.new(0, 3.6, 0)
+		M.route.AlwaysOnTop = true
+		M.route.Enabled = false
+		M.route.Parent = M.overlay
+		M.routeLabel = Instance.new("TextLabel")
+		M.routeLabel.Size = UDim2.fromScale(1, 1)
+		M.routeLabel.BackgroundColor3 = Color3.fromRGB(16, 24, 29)
+		M.routeLabel.BackgroundTransparency = 0.15
+		M.routeLabel.Font = Enum.Font.GothamBold
+		M.routeLabel.TextSize = 13
+		M.routeLabel.Parent = M.route
+		local overlayAtStart = M.overlay
+		task.spawn(function()
+			while M.alive and M.overlay == overlayAtStart do
+				local ok, err = pcall(update)
+				if not ok then
+					push("MANUAL error: " .. tostring(err))
+				end
+				task.wait(F.ManualAuto and 0.05 or 0.4)
+			end
+		end)
+	end
+
+	stopManual = function()
+		M.alive = false
+		if M.overlay then
+			M.overlay:Destroy()
+			M.overlay = nil
+		end
+		M.markers = {}
+		pending = nil
+		put(1, lblMBoard, "Board: off")
+		put(2, lblMNext, "Next: -")
+		put(3, lblMFlag, "Auto-flag: off")
 	end
 end
 
@@ -1714,24 +2313,20 @@ end)
 
 local DS = EventPage.CreateSection("Dodge Spike")
 lblSpike = DS.CreateLabel("Spikes: idle")
-DS.CreateToggle({ Title = "Dodge spike", Desc = "Step off hazardous cells, jump when crowded", Default = F.Dodge }, function(v)
+DS.CreateToggle({ Title = "Dodge spike", Desc = "Step off or jump over spikes before they come out", Default = F.Dodge }, function(v)
 	F.Dodge = v
 	saveSettings()
 	if v then
 		task.spawn(dodgeLoop)
 	end
 end)
-DS.CreateToggle({ Title = "Move off hazardous cells", Desc = "Step to the nearest safe opened cell", Default = F.DodgeMove }, setting("DodgeMove"))
-DS.CreateToggle({ Title = "Jump when crowded", Desc = "Jump on the sound cue when many cells are hazardous", Default = F.DodgeJump }, setting("DodgeJump"))
-DS.CreateDropdown({ Title = "Jump cue sound", List = { "Slash", "Warn" }, Default = F.SpikeCue }, function(v)
-	F.SpikeCue = v
-	saveSettings()
-end)
+DS.CreateToggle({ Title = "Step off hazardous cells", Desc = "Walk to the nearest safe opened cell", Default = F.DodgeMove }, setting("DodgeMove"))
+DS.CreateToggle({ Title = "Jump over spikes", Desc = "Used when walking away is not possible or the area is crowded", Default = F.DodgeJump }, setting("DodgeJump"))
+DS.CreateSlider({ Title = "Max steps to walk away", Min = 1, Max = 4, Default = F.SpikeMaxSteps }, setting("SpikeMaxSteps"))
+DS.CreateSlider({ Title = "Warning to spike time (s)", Min = 0.5, Max = 2, Default = F.SpikeEta, Precise = true }, setting("SpikeEta"))
+DS.CreateSlider({ Title = "Jump lead before spike (s)", Min = 0, Max = 0.6, Default = F.SpikeLead, Precise = true }, setting("SpikeLead"))
 DS.CreateSlider({ Title = "Area radius (studs)", Min = 4, Max = 30, Default = F.SpikeRadius }, setting("SpikeRadius"))
-DS.CreateSlider({ Title = "Crowded at (cells)", Min = 1, Max = 30, Default = F.SpikeCount }, setting("SpikeCount"))
-DS.CreateSlider({ Title = "Cue range (studs)", Min = 2, Max = 20, Default = F.SpikeCueRange }, setting("SpikeCueRange"))
-DS.CreateSlider({ Title = "Jump delay after cue (s)", Min = 0, Max = 1, Default = F.SpikeJumpDelay, Precise = true }, setting("SpikeJumpDelay"))
-DS.CreateSlider({ Title = "Fallback jump, no cue (s, 0 = off)", Min = 0, Max = 3, Default = F.SpikeFallback, Precise = true }, setting("SpikeFallback"))
+DS.CreateSlider({ Title = "Crowded at (cells)", Min = 1, Max = 40, Default = F.SpikeCount }, setting("SpikeCount"))
 DS.CreateBox({ Title = "Warning sound name", Placeholder = "Warn", Default = F.SpikeName }, function(txt)
 	F.SpikeName = tostring(txt or "")
 	saveSettings()
@@ -1745,6 +2340,36 @@ local ET = EventPage.CreateSection("Tools")
 ET.CreateButton("Dump vote prompts", dumpVotes)
 ET.CreateButton("Dump spikes", dumpSpikes)
 ET.CreateButton("Copy log", copyLog)
+
+---------------------------------------------------------------- page: Manual
+local ManualPage = Main:CreatePage({ Page_Name = "Manual", Page_Title = "Manual" })
+
+local MS = ManualPage.CreateSection("Solver ESP")
+lblMBoard = MS.CreateLabel("Board: off")
+lblMNext = MS.CreateLabel("Next: -")
+MS.CreateToggle({ Title = "Enable solver ESP", Desc = "Marks safe tiles, mines and 50/50 tiles on the board", Default = false }, function(v)
+	if v then
+		startManual()
+	else
+		stopManual()
+	end
+end)
+MS.CreateToggle({ Title = "Safe ESP", Desc = "Green: proven safe", Default = F.ManualSafe }, setting("ManualSafe"))
+MS.CreateToggle({ Title = "Bomb ESP", Desc = "Red: proven mine", Default = F.ManualBomb }, setting("ManualBomb"))
+MS.CreateToggle({ Title = "50/50 ESP", Desc = "Yellow: could be either", Default = F.ManualHalf }, setting("ManualHalf"))
+MS.CreateToggle({ Title = "Show a guess when stuck", Desc = "Blue: lowest-risk tile", Default = F.ManualSuggest }, setting("ManualSuggest"))
+
+local MA = ManualPage.CreateSection("Auto-flag")
+lblMFlag = MA.CreateLabel("Auto-flag: off")
+MA.CreateToggle({ Title = "Auto-flag", Desc = "Flags proven mines near you (turn off Auto Farm first)", Default = false }, function(v)
+	F.ManualAuto = v
+end)
+MA.CreateSlider({ Title = "Auto-flag range (studs)", Min = 1, Max = 31, Default = F.ManualRadius }, setting("ManualRadius"))
+MA.CreateSlider({ Title = "Auto-flag delay (ms)", Min = 50, Max = 1000, Default = F.ManualDelay }, setting("ManualDelay"))
+MA.CreateButton("Refresh flag token", function()
+	resetManualToken()
+	UI.CreateNoti({ Title = "Manual", Desc = "The flag token will be read again", ShowTime = 2 })
+end)
 
 -- all controls exist now: from here on changes are written to Levian Hub/<name>-minesweeper.json
 F.settingsReady = true
