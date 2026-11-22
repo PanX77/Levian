@@ -52,19 +52,19 @@ local F = {
 	firedCount = {}, -- cell key -> times PlaceFlag was fired on it this game (max 2)
 	-- dodge spike
 	Dodge = false, -- master switch
-	DodgeMove = true, -- step off cells covered by red parts
+	DodgeMove = true, -- step off hazardous cells
 	DodgeJump = true, -- jump when the area is crowded
-	SpikeRadius = 12, -- studs: "area" around the player
-	SpikeCount = 3, -- red parts in the area that count as crowded
-	SpikeJumpDelay = 0.1, -- seconds after the sound cue
-	SpikeFallback = 1.0, -- seconds crowded without a sound cue before jumping anyway (0 = off)
-	SpikeName = "", -- optional: part name that also counts as a spike
-	SpikeSound = "", -- optional: sound name that counts as the cue
+	SpikeRadius = 12, -- studs: the "area" around the player
+	SpikeCount = 4, -- hazardous cells in the area that count as crowded
+	SpikeCue = "Slash", -- which sound is the jump cue: "Slash" or "Warn"
+	SpikeCueRange = 7, -- studs: only cues from cells this close count
+	SpikeJumpDelay = 0, -- seconds after the cue
+	SpikeFallback = 0, -- seconds crowded without a cue before jumping anyway (0 = off)
+	SpikeName = "Warn", -- name of the warning sound inside a cell
+	SpikeSound = "Slash", -- name of the spike sound inside a cell
 	dodging = false,
 	DodgeBusy = false,
-	redParts = {},
-	areaCount = 0,
-	lastDense = -math.huge,
+	dangerKeys = {}, -- cell keys that are hazardous right now
 	lastCue = 0,
 	lastJump = 0,
 	settingsReady = false,
@@ -75,7 +75,7 @@ local F = {
 local SETTINGS_KEYS = {
 	"Guess", "Human", "Flagging", "AutoToken", "PassFlags", "FlagRange", "Delay",
 	"AutoEvent", "AutoSecret", "EventKw", "SecretKw",
-	"Dodge", "DodgeMove", "DodgeJump", "SpikeRadius", "SpikeCount", "SpikeJumpDelay", "SpikeFallback", "SpikeName", "SpikeSound",
+	"Dodge", "DodgeMove", "DodgeJump", "SpikeRadius", "SpikeCount", "SpikeCue", "SpikeCueRange", "SpikeJumpDelay", "SpikeFallback", "SpikeName", "SpikeSound",
 }
 local SETTINGS_FILE = "Levian Hub/" .. LP.Name .. "-minesweeper.json"
 local saveGen = 0
@@ -405,21 +405,11 @@ local function buildBoard()
 			B.list[#B.list + 1] = c
 		end
 	end
-	if F.Dodge and #F.redParts > 0 then
-		for _, rp in ipairs(F.redParts) do
-			if rp.Parent then
-				local cf, sz, rpos = rp.CFrame, rp.Size, rp.Position
-				local reach2 = (sz.X / 2 + 2.5) ^ 2 + (sz.Z / 2 + 2.5) ^ 2
-				for _, c in ipairs(B.list) do
-					local cp = c.part.Position
-					local dx, dz = cp.X - rpos.X, cp.Z - rpos.Z
-					if dx * dx + dz * dz <= reach2 then
-						local lp = cf:PointToObjectSpace(Vector3.new(cp.X, rpos.Y, cp.Z))
-						if math.abs(lp.X) < sz.X / 2 + 2.5 and math.abs(lp.Z) < sz.Z / 2 + 2.5 then
-							c.danger = true
-						end
-					end
-				end
+	if F.Dodge then
+		for key in pairs(F.dangerKeys) do
+			local c = B.cells[key]
+			if c then
+				c.danger = true
 			end
 		end
 	end
@@ -1244,6 +1234,7 @@ end
 -- or "You can't back out now." shows up
 local function pressYes(btn, kind)
 	local hasSignal = (firesignal or getconnections) ~= nil
+	local startCur
 	for i = 1, 8 do
 		if not btn.Parent or not shown(btn) then
 			return true
@@ -1253,8 +1244,14 @@ local function pressYes(btn, kind)
 			return true
 		end
 		local cur, req = voteCount(txt)
+		if i == 1 then
+			startCur = cur
+		end
 		if cur and req and cur >= req then
 			return true
+		end
+		if i >= 3 and cur and startCur and cur > startCur then
+			return true -- the count went up after a signal and a real click: the vote is in
 		end
 		local viaSignal = hasSignal and i % 2 == 1
 		local p, s = btn.AbsolutePosition, btn.AbsoluteSize
@@ -1342,52 +1339,70 @@ local function dumpVotes()
 end
 
 ---------------------------------------------------------------- DODGE SPIKE
--- Red parts = spike warnings. The bot (1) steps off a cell that red parts cover, using only
--- opened/flagged cells, and (2) jumps when the area around you is crowded, timed to a sound cue.
+-- Spikes live on the board cells: every cell part has "Warn" and "Slash" sounds (seen in the log dump).
+-- A cell is hazardous while its Warn/Slash sound is playing (or it turns red). The bot steps off a hazardous
+-- cell and, when many cells around you are hazardous, jumps on the Slash (or Warn) cue.
 local lblSpike = nil
-local overlap = OverlapParams.new()
-overlap.FilterType = Enum.RaycastFilterType.Exclude
+local cellIndex, cellIndexAt = {}, -math.huge
+local wasSlash, wasWarn = {}, {}
 
-local function isRedPart(p)
-	local c = p.Color
-	if c.R > 0.75 and c.G < 0.25 and c.B < 0.25 then
-		return true
+local function refreshIndex()
+	if os.clock() - cellIndexAt < 2 then
+		return
 	end
-	local nm = F.SpikeName:lower()
-	return nm ~= "" and p.Name:lower():find(nm, 1, true) ~= nil
-end
-
--- visible red parts around pos (the board and every player's character are ignored)
-local function nearbyReds(pos, radius)
-	local ex = {}
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl.Character then
-			ex[#ex + 1] = pl.Character
-		end
-	end
-	local board = workspace:FindFirstChild("Flag")
-	if board then
-		ex[#ex + 1] = board
-	end
-	overlap.FilterDescendantsInstances = ex
-	local out = {}
-	local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, pos, radius, overlap)
-	if ok then
-		for _, p in ipairs(parts) do
-			if p.Transparency < 0.9 and math.abs(p.Position.Y - pos.Y) < 15 and isRedPart(p) then
-				out[#out + 1] = p
+	cellIndexAt = os.clock()
+	local f = workspace:FindFirstChild("Flag")
+	local parts = f and f:FindFirstChild("Parts")
+	local list = {}
+	if parts then
+		for _, p in ipairs(parts:GetChildren()) do
+			if p:IsA("BasePart") then
+				local pos = p.Position
+				list[#list + 1] = {
+					part = p,
+					x = pos.X,
+					z = pos.Z,
+					key = ckey(math.floor(pos.X / F.CellSize + 0.5), math.floor(pos.Z / F.CellSize + 0.5)),
+				}
 			end
 		end
 	end
-	return out
+	cellIndex = list
 end
 
--- horizontal distance from pos to the footprint of a part (0 = inside it)
-local function flatDist(p, pos)
-	local lp = p.CFrame:PointToObjectSpace(pos)
-	local dx = math.max(math.abs(lp.X) - p.Size.X / 2, 0)
-	local dz = math.max(math.abs(lp.Z) - p.Size.Z / 2, 0)
-	return math.sqrt(dx * dx + dz * dz)
+local function isRedColor(c)
+	return c.R > 0.75 and c.G < 0.3 and c.B < 0.3
+end
+
+-- hazardous cells near pos: set of cell keys, how many are inside the area radius, and a fresh sound cue (cell key)
+local function scanHazards(pos)
+	local warnName = F.SpikeName ~= "" and F.SpikeName or "Warn"
+	local slashName = F.SpikeSound ~= "" and F.SpikeSound or "Slash"
+	local reach2, area2, cue2 = (F.SpikeRadius + 4) ^ 2, F.SpikeRadius ^ 2, F.SpikeCueRange ^ 2
+	local danger, count, cue = {}, 0, nil
+	for _, e in ipairs(cellIndex) do
+		local dx, dz = e.x - pos.X, e.z - pos.Z
+		local d2 = dx * dx + dz * dz
+		if d2 <= reach2 then
+			local p = e.part
+			local w, sl = p:FindFirstChild(warnName), p:FindFirstChild(slashName)
+			local warning = (w and w:IsA("Sound") and w.IsPlaying) or false
+			local slashing = (sl and sl:IsA("Sound") and sl.IsPlaying) or false
+			if warning or slashing or isRedColor(p.Color) then
+				danger[e.key] = true
+				if d2 <= area2 then
+					count += 1
+				end
+			end
+			local fresh = (F.SpikeCue == "Warn" and warning and not wasWarn[e.key])
+				or (F.SpikeCue ~= "Warn" and slashing and not wasSlash[e.key])
+			if fresh and d2 <= cue2 then
+				cue = cue or e.key
+			end
+			wasSlash[e.key], wasWarn[e.key] = slashing, warning
+		end
+	end
+	return danger, count, cue
 end
 
 local function jump(reason)
@@ -1406,64 +1421,7 @@ local function jump(reason)
 	end
 end
 
--- sound cue: a sound that starts playing right after a crowded area was seen => jump (after the delay)
-local function onSound(sn)
-	if not (F.Dodge and F.DodgeJump) or os.clock() - F.lastDense > 2 then
-		return
-	end
-	local nm = F.SpikeSound:lower()
-	if nm ~= "" and not sn.Name:lower():find(nm, 1, true) then
-		return
-	end
-	local par = sn.Parent
-	if par and par:IsA("BasePart") then
-		local char = LP.Character
-		local hrp = char and char:FindFirstChild("HumanoidRootPart")
-		if hrp and (par.Position - hrp.Position).Magnitude > 80 then
-			return
-		end
-	end
-	if os.clock() - F.lastCue < 0.15 then
-		return
-	end
-	F.lastCue = os.clock()
-	push(("[%s] SPIKE sound cue: %s -> jump in %.2fs"):format(os.date("%H:%M:%S"), path(sn), F.SpikeJumpDelay))
-	task.delay(F.SpikeJumpDelay, function()
-		jump("sound")
-	end)
-end
-local soundHooked = {}
-local function hookSound(sn)
-	if soundHooked[sn] or not sn:IsA("Sound") then
-		return
-	end
-	soundHooked[sn] = true
-	sn.Played:Connect(function()
-		onSound(sn)
-	end)
-	sn:GetPropertyChangedSignal("Playing"):Connect(function()
-		if sn.Playing then
-			onSound(sn)
-		end
-	end)
-end
-local soundsReady = false
-local function ensureSoundHooks()
-	if soundsReady then
-		return
-	end
-	soundsReady = true
-	for _, root in ipairs({ workspace, game:GetService("SoundService"), PlayerGui }) do
-		task.spawn(function()
-			for _, d in ipairs(root:GetDescendants()) do
-				hookSound(d)
-			end
-		end)
-		root.DescendantAdded:Connect(hookSound)
-	end
-end
-
--- nearest cell (through opened/flagged cells) that no red part covers
+-- nearest cell (through opened/flagged cells) that is not hazardous
 local function escapePath(B, from)
 	local prev, order = { [from.key] = false }, { from }
 	local head = 1
@@ -1514,7 +1472,6 @@ local function dodgeLoop()
 		return
 	end
 	F.DodgeBusy = true
-	ensureSoundHooks()
 	local denseSince, lastLog, lastText = nil, 0, ""
 	while F.Dodge do
 		task.wait(0.05)
@@ -1522,38 +1479,35 @@ local function dodgeLoop()
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		if not hum or not hrp or hum.Health <= 0 then
-			F.redParts, denseSince = {}, nil
+			F.dangerKeys, denseSince = {}, nil
 			continue
 		end
+		refreshIndex()
 		local pos = hrp.Position
-		local reds = nearbyReds(pos, 80)
-		F.redParts = reds -- also used by buildBoard to mark covered cells as danger
-		local area, under = 0, 0
-		for _, p in ipairs(reds) do
-			local d = flatDist(p, pos)
-			if d <= F.SpikeRadius then
-				area += 1
-			end
-			if d <= 2.2 then
-				under += 1
-			end
-		end
-		F.areaCount = area
-		local text = ("Spikes: %d in area, %d under you"):format(area, under)
+		local danger, count, cue = scanHazards(pos)
+		F.dangerKeys = danger -- buildBoard marks these cells as danger (routes avoid them)
+		local ownKey = ckey(math.floor(pos.X / F.CellSize + 0.5), math.floor(pos.Z / F.CellSize + 0.5))
+		local underMe = danger[ownKey] == true
+		local text = ("Spikes: %d cells in area%s"):format(count, underMe and " (your cell!)" or "")
 		if text ~= lastText then
 			lastText = text
 			setLabel(lblSpike, text)
 		end
 
 		-- crowded area: jump on the sound cue (or after the fallback time if no cue came)
-		if F.DodgeJump and area >= F.SpikeCount then
-			F.lastDense = os.clock()
+		if F.DodgeJump and count >= F.SpikeCount then
 			denseSince = denseSince or os.clock()
 			if os.clock() - lastLog > 1 then
 				lastLog = os.clock()
-				push(("[%s] SPIKE crowded: %d red parts within %.0f studs"):format(os.date("%H:%M:%S"), area, F.SpikeRadius))
+				push(("[%s] SPIKE crowded: %d hazardous cells within %.0f studs"):format(os.date("%H:%M:%S"), count, F.SpikeRadius))
 			end
-			if F.SpikeFallback > 0 and os.clock() - denseSince >= F.SpikeFallback and F.lastCue < denseSince then
+			if cue then
+				F.lastCue = os.clock()
+				push(("[%s] SPIKE cue (%s) at %s -> jump in %.2fs"):format(os.date("%H:%M:%S"), F.SpikeCue, cue, F.SpikeJumpDelay))
+				task.delay(F.SpikeJumpDelay, function()
+					jump("cue")
+				end)
+			elseif F.SpikeFallback > 0 and os.clock() - denseSince >= F.SpikeFallback and F.lastCue < denseSince then
 				jump("fallback")
 				denseSince = os.clock()
 			end
@@ -1561,11 +1515,11 @@ local function dodgeLoop()
 			denseSince = nil
 		end
 
-		-- a red part covers your cell: step to the nearest uncovered opened/flagged cell
-		if F.DodgeMove and under > 0 and not F.dodging then
+		-- your cell is hazardous: step to the nearest safe opened/flagged cell
+		if F.DodgeMove and underMe and not F.dodging then
 			local B = buildBoard()
 			local cur = B and curCell(B)
-			if cur and cur.danger and standable(cur) then
+			if cur and standable(cur) then
 				local path2 = escapePath(B, cur)
 				if path2 and #path2 >= 2 then
 					F.dodging, F.abort = true, true -- pause the farm loop while we move
@@ -1578,12 +1532,12 @@ local function dodgeLoop()
 					stopWalking()
 					F.dodging = false
 				elseif F.DodgeJump then
-					jump("no free cell to step to")
+					jump("no safe cell to step to")
 				end
 			end
 		end
 	end
-	F.redParts = {}
+	F.dangerKeys = {}
 	F.DodgeBusy = false
 end
 
@@ -1594,23 +1548,33 @@ local function dumpSpikes()
 		push("SPIKES: no character")
 		return
 	end
+	cellIndexAt = -math.huge
+	refreshIndex()
 	local pos = hrp.Position
-	local reds = nearbyReds(pos, 80)
-	push(("[%s] SPIKES: %d red parts within 80 studs (avatar %.1f, %.1f, %.1f)"):format(
-		os.date("%H:%M:%S"), #reds, pos.X, pos.Y, pos.Z
+	local danger, count = scanHazards(pos)
+	local ownKey = ckey(math.floor(pos.X / F.CellSize + 0.5), math.floor(pos.Z / F.CellSize + 0.5))
+	local n = 0
+	for _ in pairs(danger) do
+		n += 1
+	end
+	push(("[%s] SPIKES: %d hazardous cells near (%d in area radius), your cell %s%s"):format(
+		os.date("%H:%M:%S"), n, count, ownKey, danger[ownKey] and " IS HAZARDOUS" or ""
 	))
-	for i, p in ipairs(reds) do
-		if i > 40 then
+	local shown = 0
+	for key in pairs(danger) do
+		shown += 1
+		if shown > 40 then
 			break
 		end
-		push(("  %.1f studs | %s [%s] | size %.1f,%.1f,%.1f | transp %.2f | %s | CanQuery=%s CanCollide=%s"):format(
-			flatDist(p, pos), path(p), p.ClassName, p.Size.X, p.Size.Y, p.Size.Z, p.Transparency,
-			p.Material.Name, tostring(p.CanQuery), tostring(p.CanCollide)
-		))
+		push("  hazard cell " .. key)
 	end
-	for _, d in ipairs(workspace:GetDescendants()) do
-		if d:IsA("Sound") and d.IsPlaying then
-			push(("  SOUND playing: %s | id %s | vol %.2f"):format(path(d), tostring(d.SoundId), d.Volume))
+	for _, e in ipairs(cellIndex) do
+		if e.key == ownKey then
+			push("  children of your cell " .. path(e.part) .. ":")
+			for _, c in ipairs(e.part:GetChildren()) do
+				push(("    %s <%s>%s"):format(c.Name, c.ClassName, c:IsA("Sound") and (" playing=" .. tostring(c.IsPlaying)) or ""))
+			end
+			break
 		end
 	end
 end
@@ -1750,24 +1714,29 @@ end)
 
 local DS = EventPage.CreateSection("Dodge Spike")
 lblSpike = DS.CreateLabel("Spikes: idle")
-DS.CreateToggle({ Title = "Dodge spike", Desc = "Avoid red parts and jump when crowded", Default = F.Dodge }, function(v)
+DS.CreateToggle({ Title = "Dodge spike", Desc = "Step off hazardous cells, jump when crowded", Default = F.Dodge }, function(v)
 	F.Dodge = v
 	saveSettings()
 	if v then
 		task.spawn(dodgeLoop)
 	end
 end)
-DS.CreateToggle({ Title = "Move off red parts", Desc = "Step to the nearest cell they don't cover", Default = F.DodgeMove }, setting("DodgeMove"))
-DS.CreateToggle({ Title = "Jump when crowded", Desc = "Jump on the sound cue when many red parts are near", Default = F.DodgeJump }, setting("DodgeJump"))
+DS.CreateToggle({ Title = "Move off hazardous cells", Desc = "Step to the nearest safe opened cell", Default = F.DodgeMove }, setting("DodgeMove"))
+DS.CreateToggle({ Title = "Jump when crowded", Desc = "Jump on the sound cue when many cells are hazardous", Default = F.DodgeJump }, setting("DodgeJump"))
+DS.CreateDropdown({ Title = "Jump cue sound", List = { "Slash", "Warn" }, Default = F.SpikeCue }, function(v)
+	F.SpikeCue = v
+	saveSettings()
+end)
 DS.CreateSlider({ Title = "Area radius (studs)", Min = 4, Max = 30, Default = F.SpikeRadius }, setting("SpikeRadius"))
-DS.CreateSlider({ Title = "Crowded at (red parts)", Min = 1, Max = 15, Default = F.SpikeCount }, setting("SpikeCount"))
-DS.CreateSlider({ Title = "Jump delay after sound (s)", Min = 0, Max = 1, Default = F.SpikeJumpDelay, Precise = true }, setting("SpikeJumpDelay"))
-DS.CreateSlider({ Title = "Fallback jump, no sound (s)", Min = 0, Max = 3, Default = F.SpikeFallback, Precise = true }, setting("SpikeFallback"))
-DS.CreateBox({ Title = "Spike part name (optional)", Placeholder = "also count parts with this name", Default = F.SpikeName }, function(txt)
+DS.CreateSlider({ Title = "Crowded at (cells)", Min = 1, Max = 30, Default = F.SpikeCount }, setting("SpikeCount"))
+DS.CreateSlider({ Title = "Cue range (studs)", Min = 2, Max = 20, Default = F.SpikeCueRange }, setting("SpikeCueRange"))
+DS.CreateSlider({ Title = "Jump delay after cue (s)", Min = 0, Max = 1, Default = F.SpikeJumpDelay, Precise = true }, setting("SpikeJumpDelay"))
+DS.CreateSlider({ Title = "Fallback jump, no cue (s, 0 = off)", Min = 0, Max = 3, Default = F.SpikeFallback, Precise = true }, setting("SpikeFallback"))
+DS.CreateBox({ Title = "Warning sound name", Placeholder = "Warn", Default = F.SpikeName }, function(txt)
 	F.SpikeName = tostring(txt or "")
 	saveSettings()
 end)
-DS.CreateBox({ Title = "Spike sound name (optional)", Placeholder = "only this sound is the cue", Default = F.SpikeSound }, function(txt)
+DS.CreateBox({ Title = "Spike sound name", Placeholder = "Slash", Default = F.SpikeSound }, function(txt)
 	F.SpikeSound = tostring(txt or "")
 	saveSettings()
 end)
