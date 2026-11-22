@@ -156,6 +156,74 @@ local function fireRemote(r, ...)
 	end
 end
 
+---------------------------------------------------------------- remote spesifik game + pembelajar argumen
+local function path(p)
+	local o = RS
+	for part in p:gmatch("[^%.]+") do
+		o = o and o:FindFirstChild(part)
+	end
+	return o
+end
+
+local R = {
+	Tap = path("RemoteServices.TapService.RE.TapRequested"),
+	Rebirth = path("RemoteServices.RebirthService.RE.RebirthRequested"),
+	ClaimAll = path("RemoteServices.QuestService.RF.ClaimAllQuests"),
+}
+
+-- argumen asli yang dikirim game (saat Anda tap / rebirth manual) disimpan lalu dipakai ulang
+env.TapSimLearned = env.TapSimLearned or {}
+env.TapSimWatch = {}
+for _, r in pairs({ R.Tap, R.Rebirth }) do
+	env.TapSimWatch[r] = true
+end
+local Learned = env.TapSimLearned
+
+if not env.TapSimHooked and hookmetamethod and getnamecallmethod then
+	env.TapSimHooked = true
+	pcall(function()
+		local old
+		local function hook(self, ...)
+			local m = getnamecallmethod()
+			if (m == "FireServer" or m == "InvokeServer") and env.TapSimWatch[self] and not (checkcaller and checkcaller()) then
+				env.TapSimLearned[self] = table.pack(...)
+			end
+			return old(self, ...)
+		end
+		old = hookmetamethod(game, "__namecall", newcclosure and newcclosure(hook) or hook)
+	end)
+end
+
+local function fireLearned(r)
+	local a = Learned[r]
+	if a then
+		fireRemote(r, table.unpack(a, 1, a.n))
+	else
+		fireRemote(r)
+	end
+end
+
+local function rebirthViaRemote(done)
+	local r = R.Rebirth
+	if not r then
+		return
+	end
+	local a = Learned[r]
+	if a and type(a[1]) == "number" then
+		for _, opt in ipairs(CONFIG.RebirthOptions) do -- tertinggi -> terendah
+			local args = table.pack(table.unpack(a, 1, a.n))
+			args[1] = opt
+			pcall(fireRemote, r, table.unpack(args, 1, args.n))
+			task.wait(0.35)
+			if done() then
+				return
+			end
+		end
+	else
+		pcall(fireLearned, r)
+	end
+end
+
 ---------------------------------------------------------------- state & loop
 local State = {
 	Tap = false,
@@ -219,6 +287,9 @@ local function findTapButton()
 end
 
 local function findTapRemote()
+	if R.Tap then
+		return R.Tap
+	end
 	if tapRemote and tapRemote.Parent then
 		return tapRemote
 	end
@@ -244,7 +315,7 @@ local function tapOnce()
 	local function viaRemote()
 		local r = findTapRemote()
 		if r then
-			fireRemote(r)
+			fireLearned(r)
 			return true
 		end
 	end
@@ -343,16 +414,8 @@ local function doRebirth()
 		return
 	end
 
-	-- cadangan: lewat remote, coba opsi dari yang tertinggi
-	for _, r in ipairs(findRemotes(CONFIG.RebirthNames)) do
-		for _, opt in ipairs(CONFIG.RebirthOptions) do
-			pcall(fireRemote, r, opt)
-			task.wait(0.35)
-			if done() then
-				return
-			end
-		end
-	end
+	-- cadangan: lewat RebirthRequested
+	rebirthViaRemote(done)
 end
 
 ---------------------------------------------------------------- auto quest & claim
@@ -386,16 +449,10 @@ local function doClaim()
 		activate(b)
 		task.wait(0.1)
 	end
-	for _, r in ipairs(findRemotes(CONFIG.ClaimWords)) do
-		if hasAny(r.Name, CONFIG.QuestNames) then
-			if #CONFIG.QuestIds > 0 then
-				for _, id in ipairs(CONFIG.QuestIds) do
-					pcall(fireRemote, r, id)
-				end
-			else
-				pcall(fireRemote, r)
-			end
-		end
+	if R.ClaimAll then
+		pcall(function()
+			R.ClaimAll:InvokeServer()
+		end)
 	end
 end
 
