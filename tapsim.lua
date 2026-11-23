@@ -323,6 +323,36 @@ env.TapSimWatch = {}
 for _, r in pairs({ R.Tap, R.Rebirth, R.Hatch }) do
 	env.TapSimWatch[r] = true
 end
+-- posisi egg tersimpan per place (otomatis saat Anda hatch manual dekat egg)
+local HttpService = game:GetService("HttpService")
+local POS_FILE = "TapSim_eggpos.json"
+if not env.TapSimAllPos then
+	env.TapSimAllPos = {}
+	pcall(function()
+		if isfile and readfile and isfile(POS_FILE) then
+			local d = HttpService:JSONDecode(readfile(POS_FILE))
+			if type(d) == "table" then
+				env.TapSimAllPos = d
+			end
+		end
+	end)
+end
+local PLACE = tostring(game.PlaceId)
+env.TapSimAllPos[PLACE] = env.TapSimAllPos[PLACE] or {}
+
+local function persistPos()
+	if writefile then
+		pcall(function()
+			writefile(POS_FILE, HttpService:JSONEncode(env.TapSimAllPos))
+		end)
+	end
+end
+
+local function savedPos(arg)
+	local t = env.TapSimAllPos[PLACE][string.lower(arg)]
+	return t and Vector3.new(t[1], t[2], t[3]) or nil
+end
+
 env.TapSimLog = env.TapSimLog or {}
 env.TapSimSeen = env.TapSimSeen or 0
 local Learned = env.TapSimLearned
@@ -332,6 +362,16 @@ env.TapSimOnCall = function(self, method, ...)
 	env.TapSimSeen = env.TapSimSeen + 1
 	if env.TapSimWatch[self] then
 		env.TapSimLearned[self] = table.pack(...)
+	end
+	if self == R.Hatch then
+		local t = env.TapSimLearned[self][1]
+		local char = LP.Character
+		local root = char and char.PrimaryPart
+		if type(t) == "table" and type(t.Egg) == "string" and root then
+			local p = root.Position
+			env.TapSimAllPos[PLACE][string.lower(t.Egg)] = { p.X, p.Y, p.Z }
+			task.defer(persistPos)
+		end
 	end
 	if env.TapSimRecord and typeof(self) == "Instance" then
 		local p = fname(self)
@@ -743,54 +783,90 @@ local function eggArg()
 	return t and t.Egg or nil
 end
 
-local eggPosCache = {}
+local function norm(x)
+	return (string.gsub(lower(x), "[^%w]", ""))
+end
+
+local function objPos(o)
+	if o:IsA("Model") then
+		return o:GetPivot().Position
+	elseif o:IsA("BasePart") then
+		return o.Position
+	end
+end
+
+-- cari objek yang namanya PERSIS nama egg (tanpa spasi/simbol), atau label teks bernama egg
 local function findEggPos(arg)
-	local key = lower(arg)
+	local w1, w2 = norm(arg) .. "egg", norm(arg)
 	local char = LP.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local origin = hrp and hrp.Position or Vector3.new(0, 0, 0)
-	local best, bestD
-	for pass = 1, 2 do -- pass 1: nama mengandung "egg"; pass 2: cukup mengandung nama telur
-		for _, o in ipairs(workspace:GetDescendants()) do
-			if (o:IsA("Model") or o:IsA("BasePart")) and not (char and o:IsDescendantOf(char)) then
-				local n = lower(o.Name)
-				if string.find(n, key, 1, true) and (pass == 2 or string.find(n, "egg", 1, true)) then
-					local pos = o:IsA("Model") and o:GetPivot().Position or o.Position
-					local d = (pos - origin).Magnitude
-					if not bestD or d < bestD then
-						best, bestD = pos, d
-					end
+	local root = char and char.PrimaryPart
+	local origin = root and root.Position or Vector3.new(0, 0, 0)
+	local best, bestD, bestPath
+	for i, o in ipairs(workspace:GetDescendants()) do
+		local target
+		if o:IsA("Model") or o:IsA("BasePart") then
+			local n = norm(o.Name)
+			if n == w1 or n == w2 then
+				target = o
+			end
+		elseif o:IsA("TextLabel") then
+			local n = norm(o.Text)
+			if n == w1 or n == w2 then
+				local gui = o:FindFirstAncestorOfClass("BillboardGui") or o:FindFirstAncestorOfClass("SurfaceGui")
+				local host = gui and (gui.Adornee or gui.Parent)
+				if host and (host:IsA("BasePart") or host:IsA("Model")) then
+					target = host
 				end
 			end
 		end
-		if best then
-			break
+		if target and not (char and target:IsDescendantOf(char)) then
+			local pos = objPos(target)
+			if pos then
+				local d = (pos - origin).Magnitude
+				if not bestD or d < bestD then
+					best, bestD, bestPath = pos, d, fname(target)
+				end
+			end
+		end
+		if i % 4000 == 0 then
+			task.wait()
 		end
 	end
-	return best
+	return best, bestPath
 end
 
+local eggFound = {}
 local function tpToEgg(arg, onlyIfFar)
 	local char = LP.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if not hrp then
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
 		return false, "karakter tidak ada"
 	end
 	local key = lower(arg)
-	local pos = eggPosCache[key]
-	if not pos then
-		pos = findEggPos(arg)
-		eggPosCache[key] = pos
+	local pos, how, near, dest = savedPos(arg), "posisi tersimpan", 10, nil
+	if pos then
+		dest = pos + Vector3.new(0, 1, 0)
+	else
+		local f = eggFound[key]
+		if not f then
+			local p, path = findEggPos(arg)
+			if p then
+				f = { pos = p, path = path }
+				eggFound[key] = f
+			end
+		end
+		if not f then
+			return false, "egg tidak ditemukan; hatch manual 1x dekat egg agar posisi tersimpan"
+		end
+		pos, how, near = f.pos, "objek " .. f.path, 40
+		dest = pos + Vector3.new(0, 3, 7)
 	end
-	if not pos then
-		return false, "egg '" .. arg .. "' tidak ditemukan di workspace"
-	end
-	if onlyIfFar and (hrp.Position - pos).Magnitude < 40 then
+	if onlyIfFar and (root.Position - pos).Magnitude < near then
 		return true, "sudah dekat"
 	end
-	hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-	hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 7))
-	return true, "berhasil"
+	root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	root.CFrame = CFrame.new(dest)
+	return true, "ke " .. how
 end
 
 local hatchSeq = 0
@@ -910,6 +986,15 @@ local function diagnose()
 		end
 	else
 		add("(daftar quest tidak ditemukan)")
+	end
+
+	add("== TP EGG ==")
+	local ea = eggArg()
+	add("telur terpilih: " .. tostring(ea))
+	if ea then
+		add("posisi tersimpan: " .. tostring(savedPos(ea)))
+		local fp, fpath = findEggPos(ea)
+		add("hasil cari: " .. tostring(fpath) .. " @ " .. tostring(fp))
 	end
 
 	add("== OPSI REBIRTH ==")
@@ -1071,6 +1156,20 @@ secEgg.CreateButton({ Title = "TP ke Egg Terpilih" }, function()
 	local ok, msg = tpToEgg(arg)
 	setStatus("Hatch", "TP: " .. msg)
 	UI.CreateNoti({ Title = "TP ke " .. arg, Desc = msg, ShowTime = 3 })
+end)
+
+secEgg.CreateButton({ Title = "Simpan Posisi Saya (Egg Terpilih)" }, function()
+	local arg = eggArg()
+	local char = LP.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not arg or not root then
+		UI.CreateNoti({ Title = "Simpan Posisi", Desc = "Pilih telur dulu / karakter belum siap", ShowTime = 3 })
+		return
+	end
+	local p = root.Position
+	env.TapSimAllPos[PLACE][lower(arg)] = { p.X, p.Y, p.Z }
+	persistPos()
+	UI.CreateNoti({ Title = "Posisi tersimpan", Desc = arg, ShowTime = 3 })
 end)
 
 local secSt = Farm.CreateSection("Status")
