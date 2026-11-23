@@ -474,7 +474,7 @@ local State = {
 	Hatch = false,
 	EggName = "",
 	EggPick = "(dari hatch manual)",
-	AutoTP = false,
+	AutoTP = true,
 	HatchCount = 3,
 	HatchDelay = 1,
 	QuestDelay = 2,
@@ -1125,6 +1125,14 @@ local secEgg = Farm.CreateSection("Auto Egg")
 secEgg.CreateToggle({ Title = "Auto Hatch Telur", Desc = "Hatch otomatis telur terpilih", Default = false }, function(v)
 	State.Hatch = v
 	if v then
+		-- langsung TP ke egg begitu hatch dinyalakan
+		if State.AutoTP then
+			local egg = eggArg()
+			if egg then
+				local ok, msg = tpToEgg(egg, false)
+				setStatus("Hatch", "TP: " .. msg)
+			end
+		end
 		loop("Hatch", doHatch, "HatchDelay")
 	end
 end)
@@ -1144,7 +1152,7 @@ end)
 secEgg.CreateSlider({ Title = "Delay Hatch (detik)", Min = 0.1, Max = 5, Default = 1, Precise = true }, function(v)
 	State.HatchDelay = v
 end)
-secEgg.CreateToggle({ Title = "Auto TP ke Egg", Desc = "TP dekat egg sebelum hatch", Default = false }, function(v)
+secEgg.CreateToggle({ Title = "Auto TP ke Egg", Desc = "TP otomatis ke egg saat Auto Hatch aktif", Default = true }, function(v)
 	State.AutoTP = v
 end)
 secEgg.CreateButton({ Title = "TP ke Egg Terpilih" }, function()
