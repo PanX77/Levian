@@ -26,6 +26,8 @@ local CONFIG = {
 	TapButtonPath = "Game.Bottom.Tap.Button", -- relatif ke PlayerGui
 	ClaimButtonPath = "RightHud.Main.RightUI.Quests.ClaimAll.Claim.Button",
 	QuestListPath = "RightHud.Main.RightUI.Quests.List",
+	RebirthOptionsPath = "RightHud.Main.RightUI.Rebirths.List.Options",
+	Eggs = { "30M Egg", "Basic Egg", "Cactus Egg", "Crystal Egg", "Draconic Egg", "Geode Egg", "Heaven Egg", "Mushroom Egg", "Mycelium Egg", "Nimbus Egg", "Pumpkin Egg", "Sky Egg", "Spiked Egg", "Spotted Egg", "Void Egg", "Volcanic Egg" },
 }
 
 ---------------------------------------------------------------- setup
@@ -431,6 +433,8 @@ local State = {
 	RebirthMax = 9,
 	Hatch = false,
 	EggName = "",
+	EggPick = "(dari hatch manual)",
+	AutoTP = false,
 	HatchCount = 3,
 	HatchDelay = 1,
 	QuestDelay = 2,
@@ -681,7 +685,11 @@ local function doRebirth()
 		return
 	end
 	local before = rebirthCount()
-	for i = State.RebirthMax, 1, -1 do -- tertinggi -> terendah
+	local from, to = State.RebirthMax, 1
+	if State.RebirthIndex then
+		from, to = State.RebirthIndex, State.RebirthIndex
+	end
+	for i = from, to, -1 do -- tertinggi -> terendah
 		fireRemote(r, { Index = i })
 		task.wait(0.5)
 		local now = rebirthCount()
@@ -690,7 +698,7 @@ local function doRebirth()
 			return
 		end
 	end
-	setStatus("Rebirth", "Rebirth: belum cukup untuk Index 1-" .. State.RebirthMax)
+	setStatus("Rebirth", "Rebirth: belum cukup untuk Index " .. to .. "-" .. from)
 end
 
 ---------------------------------------------------------------- auto quest & claim
@@ -721,6 +729,70 @@ local function eggCount()
 	return v and v.Value or nil
 end
 
+local function eggArg()
+	if State.EggName ~= "" then
+		return State.EggName
+	end
+	local pick = State.EggPick
+	if pick and string.sub(pick, 1, 1) ~= "(" then
+		local n = string.gsub(pick, "%s*[Ee]gg$", "") -- "Mycelium Egg" -> "Mycelium"
+		return n
+	end
+	local a = R.Hatch and Learned[R.Hatch]
+	local t = a and type(a[1]) == "table" and a[1] or nil
+	return t and t.Egg or nil
+end
+
+local eggPosCache = {}
+local function findEggPos(arg)
+	local key = lower(arg)
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local origin = hrp and hrp.Position or Vector3.new(0, 0, 0)
+	local best, bestD
+	for pass = 1, 2 do -- pass 1: nama mengandung "egg"; pass 2: cukup mengandung nama telur
+		for _, o in ipairs(workspace:GetDescendants()) do
+			if (o:IsA("Model") or o:IsA("BasePart")) and not (char and o:IsDescendantOf(char)) then
+				local n = lower(o.Name)
+				if string.find(n, key, 1, true) and (pass == 2 or string.find(n, "egg", 1, true)) then
+					local pos = o:IsA("Model") and o:GetPivot().Position or o.Position
+					local d = (pos - origin).Magnitude
+					if not bestD or d < bestD then
+						best, bestD = pos, d
+					end
+				end
+			end
+		end
+		if best then
+			break
+		end
+	end
+	return best
+end
+
+local function tpToEgg(arg, onlyIfFar)
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return false, "karakter tidak ada"
+	end
+	local key = lower(arg)
+	local pos = eggPosCache[key]
+	if not pos then
+		pos = findEggPos(arg)
+		eggPosCache[key] = pos
+	end
+	if not pos then
+		return false, "egg '" .. arg .. "' tidak ditemukan di workspace"
+	end
+	if onlyIfFar and (hrp.Position - pos).Magnitude < 40 then
+		return true, "sudah dekat"
+	end
+	hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 7))
+	return true, "berhasil"
+end
+
 local hatchSeq = 0
 local function doHatch()
 	local r = R.Hatch
@@ -728,13 +800,19 @@ local function doHatch()
 		setStatus("Hatch", "Hatch: remote tidak ditemukan")
 		return
 	end
-	local a = Learned[r]
-	local t = a and type(a[1]) == "table" and a[1] or nil
-	local egg = (State.EggName ~= "" and State.EggName) or (t and t.Egg)
+	local egg = eggArg()
 	if not egg then
-		setStatus("Hatch", "Hatch: hatch manual 1x atau isi nama telur")
+		setStatus("Hatch", "Hatch: pilih telur atau hatch manual 1x")
 		return
 	end
+	if State.AutoTP then
+		local ok, msg = tpToEgg(egg, true)
+		if not ok then
+			setStatus("Hatch", "TP: " .. msg)
+		end
+	end
+	local a = Learned[r]
+	local t = a and type(a[1]) == "table" and a[1] or nil
 	hatchSeq = math.max(hatchSeq, t and tonumber(t.Seq) or 0) + 1
 	local before = eggCount()
 	fireRemote(r, { Egg = egg, Count = State.HatchCount, Seq = hatchSeq, Auto = false })
@@ -834,6 +912,30 @@ local function diagnose()
 		add("(daftar quest tidak ditemukan)")
 	end
 
+	add("== OPSI REBIRTH ==")
+	local ro = guiPath(CONFIG.RebirthOptionsPath)
+	if ro then
+		for _, c in ipairs(ro:GetChildren()) do
+			local texts = {}
+			for _, d in ipairs(c:GetDescendants()) do
+				if d:IsA("TextLabel") and d.Text ~= "" then
+					texts[#texts + 1] = d.Text
+				end
+			end
+			add(c.Name .. ": " .. table.concat(texts, " | "))
+		end
+	end
+
+	add("== EGG DI WORKSPACE ==")
+	cnt = 0
+	for _, o in ipairs(workspace:GetDescendants()) do
+		if cnt < 40 and (o:IsA("Model") or o:IsA("BasePart")) and string.find(lower(o.Name), "egg", 1, true) then
+			cnt = cnt + 1
+			local pos = o:IsA("Model") and o:GetPivot().Position or o.Position
+			add(fname(o) .. " @ " .. math.floor(pos.X) .. "," .. math.floor(pos.Y) .. "," .. math.floor(pos.Z))
+		end
+	end
+
 	add("== LOG REKAMAN ==")
 	for _, e in ipairs(env.TapSimLog or {}) do
 		add(e.line .. (e.n > 1 and (" x" .. e.n) or ""))
@@ -846,8 +948,12 @@ local function diagnose()
 end
 
 ---------------------------------------------------------------- UI
+-- override dari tapsim2.lua (world 2); dibersihkan supaya tidak terbawa ke eksekusi berikutnya
+local eggsOverride, titleOverride = env.TapSimEggs, env.TapSimTitle
+env.TapSimEggs, env.TapSimTitle = nil, nil
+
 UI = loadUI()
-Main = UI.CreateMain({ Title = "Levian Hub", Desc = " - Tap Simulator Reborn" })
+Main = UI.CreateMain({ Title = "Levian Hub", Desc = titleOverride or " - Tap Simulator Reborn" })
 local Farm = Main:CreatePage({ Page_Name = "Farm", Page_Title = "Farm" })
 
 local secTap = Farm.CreateSection("Auto Tap")
@@ -888,6 +994,27 @@ end)
 secReb.CreateSlider({ Title = "Index Rebirth Maks", Min = 1, Max = 11, Default = 9 }, function(v)
 	State.RebirthMax = v
 end)
+local rebList, rebIndex = { "Tertinggi (otomatis)" }, {}
+for i = 1, 9 do
+	local label = "Index " .. i
+	local o = guiPath(CONFIG.RebirthOptionsPath .. "." .. i)
+	if o then
+		local texts = {}
+		for _, d in ipairs(o:GetDescendants()) do
+			if d:IsA("TextLabel") and d.Text ~= "" then
+				texts[#texts + 1] = trim(d.Text)
+			end
+		end
+		if #texts > 0 then
+			label = label .. " (" .. string.sub(table.concat(texts, " "), 1, 24) .. ")"
+		end
+	end
+	rebList[#rebList + 1] = label
+	rebIndex[label] = i
+end
+secReb.CreateDropdown({ Title = "Pilihan Rebirth", List = rebList, Default = rebList[1] }, function(v)
+	State.RebirthIndex = rebIndex[v]
+end)
 
 local secQ = Farm.CreateSection("Quest")
 secQ.CreateToggle({ Title = "Auto Quest", Desc = "Ambil quest & tap sampai selesai", Default = false }, function(v)
@@ -905,23 +1032,45 @@ secQ.CreateToggle({ Title = "Auto Claim Quest", Desc = "Claim quest yang sudah s
 		hideMenu()
 	end
 end)
-secQ.CreateToggle({ Title = "Auto Hatch Telur", Desc = "Untuk quest hatch; pakai telur dari hatch manual", Default = false }, function(v)
+secQ.CreateSlider({ Title = "Delay Quest/Claim (detik)", Min = 1, Max = 30, Default = 2 }, function(v)
+	State.QuestDelay, State.ClaimDelay = v, v
+end)
+
+local secEgg = Farm.CreateSection("Auto Egg")
+secEgg.CreateToggle({ Title = "Auto Hatch Telur", Desc = "Hatch otomatis telur terpilih", Default = false }, function(v)
 	State.Hatch = v
 	if v then
 		loop("Hatch", doHatch, "HatchDelay")
 	end
 end)
-secQ.CreateBox({ Title = "Nama Telur", Placeholder = "mis. Mycelium" }, function(v)
+local eggList = { "(dari hatch manual)" }
+for _, n in ipairs(eggsOverride or CONFIG.Eggs) do
+	eggList[#eggList + 1] = n
+end
+secEgg.CreateDropdown({ Title = "Pilih Telur", List = eggList, Search = true, Default = eggList[1] }, function(v)
+	State.EggPick = v
+end)
+secEgg.CreateBox({ Title = "Nama Manual (opsional)", Placeholder = "persis seperti di game" }, function(v)
 	State.EggName = trim(tostring(v or ""))
 end)
-secQ.CreateSlider({ Title = "Jumlah per Hatch", Min = 1, Max = 10, Default = 3 }, function(v)
+secEgg.CreateSlider({ Title = "Jumlah per Hatch", Min = 1, Max = 10, Default = 3 }, function(v)
 	State.HatchCount = v
 end)
-secQ.CreateSlider({ Title = "Delay Hatch (detik)", Min = 0.1, Max = 5, Default = 1, Precise = true }, function(v)
+secEgg.CreateSlider({ Title = "Delay Hatch (detik)", Min = 0.1, Max = 5, Default = 1, Precise = true }, function(v)
 	State.HatchDelay = v
 end)
-secQ.CreateSlider({ Title = "Delay Quest/Claim (detik)", Min = 1, Max = 30, Default = 2 }, function(v)
-	State.QuestDelay, State.ClaimDelay = v, v
+secEgg.CreateToggle({ Title = "Auto TP ke Egg", Desc = "TP dekat egg sebelum hatch", Default = false }, function(v)
+	State.AutoTP = v
+end)
+secEgg.CreateButton({ Title = "TP ke Egg Terpilih" }, function()
+	local arg = eggArg()
+	if not arg then
+		UI.CreateNoti({ Title = "TP", Desc = "Pilih telur dulu", ShowTime = 3 })
+		return
+	end
+	local ok, msg = tpToEgg(arg)
+	setStatus("Hatch", "TP: " .. msg)
+	UI.CreateNoti({ Title = "TP ke " .. arg, Desc = msg, ShowTime = 3 })
 end)
 
 local secSt = Farm.CreateSection("Status")
