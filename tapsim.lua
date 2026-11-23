@@ -24,6 +24,7 @@ local CONFIG = {
 	ConfirmTexts = { "yes", "confirm", "ok", "sure", "rebirth now" },
 	ClaimButtonPath = "RightHud.Main.RightUI.Quests.ClaimAll.Claim.Button",
 	QuestListPath = "RightHud.Main.RightUI.Quests.List",
+	Areas = { "Spawn", "Sky Island", "Autumn", "Mushroom", "Desert", "Crystal Cave", "Shadow Realm", "Volcano", "Heaven" },
 	RebirthOptionsPath = "RightHud.Main.RightUI.Rebirths.List.Options",
 	Eggs = { "30M Egg", "Basic Egg", "Cactus Egg", "Crystal Egg", "Draconic Egg", "Geode Egg", "Heaven Egg", "Mushroom Egg", "Mycelium Egg", "Nimbus Egg", "Pumpkin Egg", "Sky Egg", "Spiked Egg", "Spotted Egg", "Void Egg", "Volcanic Egg" },
 }
@@ -305,6 +306,8 @@ local R = {
 	Rebirth = path("RemoteServices.RebirthService.RE.RebirthRequested"),
 	ClaimAll = path("RemoteServices.QuestService.RF.ClaimAllQuests"),
 	Hatch = path("RemoteServices.EggService.RE.EggHatchRequested"),
+	TravelWorld = path("RemoteServices.WorldService.RF.Travel"),
+	TravelIsland = path("RemoteServices.IslandService.RF.Travel"),
 }
 
 local function guiPath(p)
@@ -318,7 +321,7 @@ end
 ---------------------------------------------------------------- perekam remote (hook)
 env.TapSimLearned = env.TapSimLearned or {}
 env.TapSimWatch = {}
-for _, r in pairs({ R.Tap, R.Rebirth, R.Hatch }) do
+for _, r in pairs({ R.Tap, R.Rebirth, R.Hatch, R.TravelWorld, R.TravelIsland }) do
 	env.TapSimWatch[r] = true
 end
 -- posisi egg tersimpan per place (otomatis saat Anda hatch manual dekat egg)
@@ -467,6 +470,7 @@ local State = {
 	RebirthDelay = 3,
 	RebirthMax = 9,
 	Hatch = false,
+	Area = "Spawn",
 	EggPick = "(dari hatch manual)",
 	AutoTP = true,
 	HatchCount = 1,
@@ -871,6 +875,121 @@ local function doHatch()
 	setStatus("Hatch", "Hatch: " .. egg .. " x" .. State.HatchCount .. ((before and now) and (" | Eggs +" .. (now - before)) or ""))
 end
 
+---------------------------------------------------------------- teleport area
+local areaByNorm = {}
+for _, n in ipairs(CONFIG.Areas) do
+	areaByNorm[norm(n)] = n
+end
+
+-- samakan gaya penulisan nama area dengan contoh yang dikirim game ("Desert", "desert", "sky_island", ...)
+local function styled(name, sample)
+	local pascal = (string.gsub(name, "%s+", ""))
+	if string.find(sample, "%s") then
+		return name
+	elseif string.find(sample, "_") then
+		return (string.gsub(lower(name), "%s+", "_"))
+	elseif sample == lower(sample) then
+		return lower(pascal)
+	end
+	return pascal
+end
+
+local function subst(v, name)
+	if type(v) == "string" and areaByNorm[norm(v)] then
+		return styled(name, v), true
+	elseif type(v) == "table" then
+		local out, any = {}, false
+		for k, x in pairs(v) do
+			local nx, ch = subst(x, name)
+			out[k] = nx
+			any = any or ch
+		end
+		return out, any
+	end
+	return v, false
+end
+
+-- pakai argumen Travel asli (dari perjalanan manual Anda), nama area diganti
+local function travelViaRemote(name)
+	for _, r in ipairs({ R.TravelWorld, R.TravelIsland }) do
+		local a = r and Learned[r]
+		if a then
+			local args, changed = {}, false
+			for i = 1, a.n do
+				local nv, ch = subst(a[i], name)
+				args[i] = nv
+				changed = changed or ch
+			end
+			if changed then
+				local ok, res = pcall(function()
+					return r:InvokeServer(table.unpack(args, 1, a.n))
+				end)
+				if ok then
+					return true, "via " .. r.Name .. " -> " .. ser(res)
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function findAreaPos(name)
+	local a = norm(name)
+	local want = { [a] = true, [a .. "spawn"] = true, ["spawn" .. a] = true, [a .. "zone"] = true, [a .. "area"] = true }
+	local char = LP.Character
+	local root = char and char.PrimaryPart
+	local origin = root and root.Position or Vector3.new(0, 0, 0)
+	local best, bestD, bestPath
+	for i, o in ipairs(workspace:GetDescendants()) do
+		local hit = false
+		if name == "Spawn" and o:IsA("SpawnLocation") then
+			hit = true
+		elseif (o:IsA("Model") or o:IsA("BasePart")) and want[norm(o.Name)] then
+			hit = true
+		end
+		if hit and not (char and o:IsDescendantOf(char)) then
+			local pos = objPos(o)
+			if pos then
+				local d = (pos - origin).Magnitude
+				if not bestD or d < bestD then
+					best, bestD, bestPath = pos, d, fname(o)
+				end
+			end
+		end
+		if i % 4000 == 0 then
+			task.wait()
+		end
+	end
+	return best, bestPath
+end
+
+local function tpArea(name)
+	local char = LP.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return false, "karakter tidak ada"
+	end
+	local function moveTo(pos, up)
+		root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		root.CFrame = CFrame.new(pos + Vector3.new(0, up, 0))
+	end
+	local sp = savedPos("area:" .. name)
+	if sp then
+		moveTo(sp, 2)
+		return true, "posisi tersimpan"
+	end
+	local ok, msg = travelViaRemote(name)
+	if ok then
+		return true, msg
+	end
+	local p, path = findAreaPos(name)
+	if p then
+		moveTo(p, 5)
+		return true, "objek " .. path
+	end
+	return false, "belum ada posisi: datangi area itu lalu tekan Simpan Posisi"
+end
+
 ---------------------------------------------------------------- diagnostik
 local function diagnose()
 	scanRemotes()
@@ -969,6 +1088,23 @@ local function diagnose()
 		add("posisi tersimpan: " .. tostring(savedPos(ea)))
 		local fp, fpath = findEggPos(ea)
 		add("hasil cari: " .. tostring(fpath) .. " @ " .. tostring(fp))
+	end
+
+	add("== AREA ==")
+	for k, v in pairs(env.TapSimAllPos[PLACE]) do
+		if string.sub(k, 1, 5) == "area:" then
+			add("tersimpan " .. k .. " = " .. math.floor(v[1]) .. "," .. math.floor(v[2]) .. "," .. math.floor(v[3]))
+		end
+	end
+	cnt = 0
+	for _, o in ipairs(workspace:GetDescendants()) do
+		if cnt < 40 and (o:IsA("Model") or o:IsA("BasePart")) and hasAny(o.Name, { "spawn", "zone", "portal", "island" }) then
+			cnt = cnt + 1
+			local pos = objPos(o)
+			if pos then
+				add(fname(o) .. " @ " .. math.floor(pos.X) .. "," .. math.floor(pos.Y) .. "," .. math.floor(pos.Z))
+			end
+		end
 	end
 
 	add("== OPSI REBIRTH ==")
@@ -1153,6 +1289,31 @@ secUtil.CreateButton({ Title = "Tampilkan Log Rekaman" }, function()
 	local head = "hookVer=" .. tostring(env.TapSimHookVer) .. " | panggilan terlihat=" .. tostring(env.TapSimSeen) .. "\n"
 	showText("Log Rekaman", head .. (#lines > 0 and table.concat(lines, "\n") or "(kosong)"))
 end)
+
+local Tele = Main:CreatePage({ Page_Name = "Teleport", Page_Title = "Teleport" })
+local secTele = Tele.CreateSection("Area")
+secTele.CreateDropdown({ Title = "Pilih Area", List = CONFIG.Areas, Default = CONFIG.Areas[1] }, function(v)
+	State.Area = v
+end)
+secTele.CreateButton({ Title = "Teleport" }, function()
+	local ok, msg = tpArea(State.Area)
+	setStatus("Tele", "Teleport " .. State.Area .. ": " .. msg)
+	UI.CreateNoti({ Title = ok and ("Teleport ke " .. State.Area) or "Teleport gagal", Desc = msg, ShowTime = 4 })
+end)
+secTele.CreateButton({ Title = "Simpan Posisi Saya (Area Terpilih)" }, function()
+	local char = LP.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		UI.CreateNoti({ Title = "Simpan Posisi", Desc = "Karakter belum siap", ShowTime = 3 })
+		return
+	end
+	local p = root.Position
+	env.TapSimAllPos[PLACE]["area:" .. lower(State.Area)] = { p.X, p.Y, p.Z }
+	persistPos()
+	setStatus("Tele", "Posisi " .. State.Area .. " tersimpan")
+	UI.CreateNoti({ Title = "Posisi tersimpan", Desc = State.Area, ShowTime = 3 })
+end)
+Status.Tele = secTele.CreateLabel({ Title = "Teleport: -" })
 
 local Setting = Main:CreatePage({ Page_Name = "Setting", Page_Title = "Setting" })
 local secMenu = Setting.CreateSection("Menu")
