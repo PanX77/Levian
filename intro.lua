@@ -353,16 +353,18 @@ while not fabExists() and os.clock() - t0 < 4 do
 end
 task.wait(0.15)
 
--- 7. Logo dan layar hitam (plus glow pinggir) hilang BERSAMAAN
+-- 7. Layar hitam (plus glow pinggir) dan logo mulai hilang bersamaan
 local FADE_T = 1.1
 local FADE = Enum.EasingDirection.InOut
 tween(bg, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
 for _, e in ipairs(edges) do
 	tween(e, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
 end
-tween(circle, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
+-- Logo hilang lebih cepat dari layar hitam (ubah LOGO_FADE_T kalau mau)
+local LOGO_FADE_T = 0.45
+tween(circle, LOGO_FADE_T, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.Out)
 for _, b in ipairs(bars) do
-	tween(b.frame, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
+	tween(b.frame, LOGO_FADE_T, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.Out)
 end
 task.wait(FADE_T + 0.1)
 gui:Destroy()
