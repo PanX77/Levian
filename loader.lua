@@ -3,6 +3,7 @@
 
 local base = "https://levianstore.my.id/"
 local games = {
+	[123974602339071] = "tes.lua" -- Just for test
 	[2753915549] = "bf.lua", -- Blox Fruits Sea 1
 	[4442272183] = "bf.lua", -- Sea 2
 	[7449423635] = "bf.lua", -- Sea 3
