@@ -1,5 +1,5 @@
 --[[
-	Levian Hub - Minesweeper
+	Levian Hub - bLockerman's Minesweeper
 	Auto Farm: minesweeper solver + flag mines + walk to safe blocks.
 
 	- Mines can't be read from the client. The bot deduces them from the revealed numbers
@@ -229,6 +229,7 @@ end
 
 ---------------------------------------------------------------- AUTO FARM (minesweeper solver)
 local proveMines -- set by the Manual module: mines proven by the stronger solver (key -> part)
+local guessTiles -- set by the Manual module: safe / lowest-risk tiles in the same order as the Manual ESP
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 local function dirs()
 	if not F.Human then
@@ -641,24 +642,6 @@ local function flagCell(B, cell, src)
 	return false
 end
 
-local function guessTarget(B, cons, reduce, mineK)
-	local prob, best, bestp = {}, nil, 2
-	for _, k in ipairs(cons) do
-		local U, rem = reduce(k)
-		if #U > 0 and rem > 0 then
-			for _, u in ipairs(U) do
-				prob[u.key] = math.max(prob[u.key] or 0, rem / #U)
-			end
-		end
-	end
-	for key, p in pairs(prob) do
-		if p < bestp and not mineK[key] and B.cells[key].state == "unk" then
-			bestp, best = p, B.cells[key]
-		end
-	end
-	return best, bestp
-end
-
 -- nearest unflagged mine (within range)
 local function pickMine(mineK, pos, maxDist)
 	local best, bd
@@ -781,7 +764,7 @@ local function farmLoop()
 			continue
 		end
 
-		local mineK, safeK, cons, reduce = solve(B)
+		local mineK, safeK = solve(B)
 		local proven = proveMines and proveMines() or nil -- exhaustive solver: finds mines the basic rules miss
 		if proven then
 			for key in pairs(proven) do
@@ -832,17 +815,38 @@ local function farmLoop()
 
 		if F.Run and not acted then
 			cur = curCell(B)
-			if F.Guess and cur and standable(cur) then
-				local g, p = guessTarget(B, cons, reduce, mineK)
-				if g then
-					local okG, tg = stepToward(B, cur, function(n)
-						return n == g
-					end)
-					if okG then
-						waitRevealed(tg)
-						quick = true
+			-- Same choice as the Manual solver: tiles it proves safe first, then (only if "Guess when stuck" is on) the
+			-- lowest mine-risk tile, i.e. the blue guess, nearest first. The first tile that can be reached is used.
+			if cur and standable(cur) and guessTiles then
+				local list = guessTiles()
+				if list then
+					local tried = 0
+					for _, g in ipairs(list) do
+						if g.risk ~= 0 and not F.Guess then
+							break
+						end
+						local cell = B.cells[cellKeyOf(g.part)]
+						if cell and cell.state == "unk" and not cell.danger then
+							tried += 1
+							local okG, tg = stepToward(B, cur, function(n)
+								return n == cell
+							end)
+							if okG then
+								push(("[%s] %s %s%s"):format(
+									os.date("%H:%M:%S"),
+									g.risk == 0 and "PROVEN SAFE" or "GUESS",
+									cell.key,
+									(g.risk and g.risk ~= 0) and (" (mine risk %.0f%%)"):format(g.risk * 100) or ""
+								))
+								waitRevealed(tg)
+								quick, acted = true, true
+								break
+							end
+							if tried >= 12 then
+								break
+							end
+						end
 					end
-					acted = true
 				end
 			end
 			if not acted then
@@ -1867,6 +1871,43 @@ do
 		requestArgument, nextLookup = nil, 0
 	end
 
+	-- used by Auto Farm when stuck: unopened, unflagged tiles ordered exactly like the Manual solver picks them:
+	-- proven-safe tiles first, then the lowest mine risk (the blue guess), nearest first. Proven mines are left out.
+	guessTiles = function()
+		local board = workspace:FindFirstChild("Flag")
+		local parts = board and board:FindFirstChild("Parts")
+		local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+		if not parts or not root then
+			return nil
+		end
+		local tiles, count = readBoard(parts)
+		local marks, valid, clueCount = solveBoard(parts, tiles, count)
+		if not valid or clueCount == 0 then
+			return nil
+		end
+		local list = {}
+		for id, tile in pairs(tiles) do
+			if tile.number == nil and not tile.flagged then
+				local risk = marks[id]
+				if risk ~= 1 then
+					list[#list + 1] = {
+						part = tile.part,
+						risk = risk,
+						score = risk == 0 and -1 or (risk or math.huge),
+						dist = (root.Position - tile.part.Position).Magnitude,
+					}
+				end
+			end
+		end
+		table.sort(list, function(a, b)
+			if a.score ~= b.score then
+				return a.score < b.score
+			end
+			return a.dist < b.dist
+		end)
+		return list
+	end
+
 	-- used by Auto Farm: unopened, unflagged tiles the exhaustive solver proves to be mines
 	proveMines = function()
 		local board = workspace:FindFirstChild("Flag")
@@ -2107,7 +2148,7 @@ do
 end
 
 ---------------------------------------------------------------- UI
-local Main = UI.CreateMain({ Title = "Levian Hub - Minesweeper" })
+local Main = UI.CreateMain({ Title = "Levian Hub - bLockerman's Minesweeper" })
 
 -- "About Us": bigger, centered heading. The library's label has no size/alignment option, so the label is
 -- restyled after it is created. The library puts its ScreenGui in CoreGui (or gethui / PlayerGui), so look in all.
