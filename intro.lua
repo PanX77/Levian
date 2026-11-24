@@ -331,14 +331,7 @@ end
 -- layar tetap hitam selama logo terbang; tunggu sampai logo mendarat
 task.wait(1.45)
 
--- 6. Logo sudah di posisi: layar hitam (dan glow pinggir) memudar
-tween(bg, 1.1, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
-for _, e in ipairs(edges) do
-	tween(e, 1.1, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
-end
-task.wait(1.15)
-
--- 7. Tunggu tombol bulat asli muncul, lalu logo menghilang halus di atasnya
+-- 6. Logo sudah di posisi: tunggu tombol bulat asli muncul (maks 4 detik)
 local function fabExists()
 	local getters = {
 		function() return gethui() end,
@@ -360,9 +353,16 @@ while not fabExists() and os.clock() - t0 < 4 do
 end
 task.wait(0.15)
 
-tween(circle, 0.35, {BackgroundTransparency = 1}, SOFT)
-for _, b in ipairs(bars) do
-	tween(b.frame, 0.35, {BackgroundTransparency = 1}, SOFT)
+-- 7. Logo dan layar hitam (plus glow pinggir) hilang BERSAMAAN
+local FADE_T = 1.1
+local FADE = Enum.EasingDirection.InOut
+tween(bg, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
+for _, e in ipairs(edges) do
+	tween(e, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
 end
-task.wait(0.4)
+tween(circle, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
+for _, b in ipairs(bars) do
+	tween(b.frame, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
+end
+task.wait(FADE_T + 0.1)
 gui:Destroy()
