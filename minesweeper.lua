@@ -122,7 +122,6 @@ end
 loadSettings()
 local logs = {}
 local flagTemplate -- PlaceFlag arguments (the part is swapped when used)
-local lblTpl, lblFarm
 
 ---------------------------------------------------------------- util
 -- this game names instances with many newlines; replace them with "¶" to keep logs tidy
@@ -224,10 +223,7 @@ local function ensureTemplate()
 	local tk = findFlagToken()
 	if tk then
 		flagTemplate = { n = 3, [2] = tk, [3] = true }
-		setLabel(lblTpl, "Flag template: automatic (token ..." .. tk:sub(-4) .. ")")
 		push("TOKEN read from the game (MouseControl)")
-	else
-		setLabel(lblTpl, "Flag template: waiting for the game's token (needs filtergc)")
 	end
 end
 
@@ -246,9 +242,6 @@ local function dirs()
 	return d
 end
 
-local function fstatus(t)
-	setLabel(lblFarm, "Status: " .. t)
-end
 local function ckey(x, z)
 	return x .. "," .. z
 end
@@ -636,7 +629,6 @@ local function flagCell(B, cell, src)
 	local tk = findFlagToken()
 	if tk and tostring(flagTemplate[2]) ~= tk then
 		flagTemplate = { n = 3, [2] = tk, [3] = true }
-		setLabel(lblTpl, "Flag template: automatic (token ..." .. tk:sub(-4) .. ")")
 		push("FLAG token refreshed")
 		if fireFlag(cell.part) and waitFlag(cell.part, 0.8) then
 			return true
@@ -752,19 +744,16 @@ local function farmLoop()
 		if F.abort then
 			F.abort = false -- the watchdog saw the game end/restart: everything in progress already stopped
 			stopWalking()
-			fstatus("game ended / reset, rescanning")
 		end
 		local char = LP.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		if not hum or not hrp or hum.Health <= 0 then
-			fstatus("waiting for respawn")
 			task.wait(1)
 			continue
 		end
 		local B = buildBoard()
 		if not B or #B.list == 0 then
-			fstatus("board not found (workspace.Flag.Parts)")
 			task.wait(1)
 			continue
 		end
@@ -788,7 +777,6 @@ local function farmLoop()
 
 		local cur = curCell(B)
 		if not cur or not standable(cur) then
-			fstatus("waiting for the game to start / not on an opened block")
 			task.wait(1)
 			continue
 		end
@@ -820,11 +808,8 @@ local function farmLoop()
 				if not m then
 					break
 				end
-				fstatus("flagging mine " .. m.cell.key)
 				if flagCell(B, m.cell, m.src) then
 					acted = true
-				elseif not F.abort then
-					fstatus("flag failed (token changed? use Refresh flag token)")
 				end
 			end
 		end
@@ -832,7 +817,6 @@ local function farmLoop()
 		-- 2) walk to the nearest safe block
 		cur = curCell(B)
 		if F.Run and not F.abort and cur and standable(cur) and next(safeK) then
-			fstatus("walking to a safe block")
 			local okStep, tgt = stepToward(B, cur, function(n)
 				return safeK[n.key] ~= nil
 			end)
@@ -851,7 +835,6 @@ local function farmLoop()
 			if F.Guess and cur and standable(cur) then
 				local g, p = guessTarget(B, cons, reduce, mineK)
 				if g then
-					fstatus(("guessing %s (risk ~%d%%)"):format(g.key, math.floor(p * 100)))
 					local okG, tg = stepToward(B, cur, function(n)
 						return n == g
 					end)
@@ -863,7 +846,6 @@ local function farmLoop()
 				end
 			end
 			if not acted then
-				fstatus(flagTemplate and "stuck / done: no certain move" or "stuck (no flag template yet)")
 				if not notified then
 					notified = true
 					UI.CreateNoti({ Title = "Auto Farm", Desc = "No certain move. Waiting for the next game.", ShowTime = 4 })
@@ -875,7 +857,6 @@ local function farmLoop()
 		end
 	end
 	F.Busy = false
-	fstatus("off")
 end
 
 -- print the board as the script reads it: # unopened, F flag, . empty, number
@@ -2194,8 +2175,6 @@ end
 local Page = Main:CreatePage({ Page_Name = "Auto Farm", Page_Title = "Auto Farm" })
 
 local FS = Page.CreateSection("Auto Minesweeper")
-lblTpl = FS.CreateLabel("Flag template: waiting for the game's token")
-lblFarm = FS.CreateLabel("Status: off")
 FS.CreateToggle({ Title = "Auto Farm", Desc = "Auto flag and open safe blocks", Default = false }, function(v)
 	F.Run = v
 	if v then
@@ -2221,7 +2200,6 @@ Tools.CreateButton("Refresh flag token", function()
 	local tk = findFlagToken()
 	if tk then
 		flagTemplate = { n = 3, [2] = tk, [3] = true }
-		setLabel(lblTpl, "Flag template: automatic (token ..." .. tk:sub(-4) .. ")")
 		resetFlags()
 		UI.CreateNoti({ Title = "Token", Desc = "Flag token read from the game", ShowTime = 3 })
 	else
