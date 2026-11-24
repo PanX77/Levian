@@ -43,6 +43,43 @@ bg.BackgroundTransparency = 1
 bg.BorderSizePixel = 0
 bg.Active = true
 bg.Parent = gui
+
+-- Glow biru tipis di pinggir layar (4 sisi, memudar ke tengah)
+local edgeVp = bg.AbsoluteSize
+if edgeVp.X < 100 or edgeVp.Y < 100 then
+	local cam = workspace.CurrentCamera
+	edgeVp = (cam and cam.ViewportSize) or Vector2.new(1280, 720)
+end
+local EDGE = math.floor(math.min(edgeVp.X, edgeVp.Y) * 0.1) -- tebal glow
+local EDGE_COLOR = Color3.fromRGB(70, 130, 255)
+local edges = {}
+local function edge(pos, size, rot)
+	local f = Instance.new("Frame")
+	f.Position = pos
+	f.Size = size
+	f.BorderSizePixel = 0
+	f.BackgroundColor3 = EDGE_COLOR
+	f.BackgroundTransparency = 1
+	f.ZIndex = 2
+	f.Active = false
+	f.Parent = gui
+	local g = Instance.new("UIGradient")
+	g.Rotation = rot
+	g.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.6), -- tepi layar: samar
+		NumberSequenceKeypoint.new(1, 1),   -- ke tengah: hilang
+	})
+	g.Parent = f
+	table.insert(edges, f)
+end
+edge(UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, EDGE), 90)                       -- atas
+edge(UDim2.new(0, 0, 1, -EDGE), UDim2.new(1, 0, 0, EDGE), -90)                   -- bawah
+edge(UDim2.fromOffset(0, 0), UDim2.new(0, EDGE, 1, 0), 0)                        -- kiri
+edge(UDim2.new(1, -EDGE, 0, 0), UDim2.new(0, EDGE, 1, 0), 180)                   -- kanan
+
+for _, e in ipairs(edges) do
+	tween(e, 0.8, {BackgroundTransparency = 0}, Enum.EasingStyle.Sine)
+end
 tween(bg, 0.8, {BackgroundTransparency = 0}).Completed:Wait()
 
 -- Ukuran layar (otomatis PC / HP)
@@ -291,11 +328,17 @@ end
 for _, b in ipairs(bars) do
 	tween(b.stroke, 0.6, {Transparency = 1}, SOFT)
 end
--- layar hitam memudar, game terlihat kembali
-tween(bg, 1.2, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
+-- layar tetap hitam selama logo terbang; tunggu sampai logo mendarat
 task.wait(1.45)
 
--- 6. Tunggu tombol bulat asli muncul, lalu logo menghilang halus di atasnya
+-- 6. Logo sudah di posisi: layar hitam (dan glow pinggir) memudar
+tween(bg, 1.1, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
+for _, e in ipairs(edges) do
+	tween(e, 1.1, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
+end
+task.wait(1.15)
+
+-- 7. Tunggu tombol bulat asli muncul, lalu logo menghilang halus di atasnya
 local function fabExists()
 	local getters = {
 		function() return gethui() end,
