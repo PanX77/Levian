@@ -1,6 +1,6 @@
--- Levian Hub Intro
+-- Levian Hub Intro (responsive: PC & HP)
 local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
+local TextService = game:GetService("TextService")
 local Players = game:GetService("Players")
 
 local function tween(obj, t, props, style, dir)
@@ -22,7 +22,18 @@ gui.Name = "LevianIntro"
 gui.IgnoreGuiInset = true
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 999999
+pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
 gui.Parent = parent
+
+-- Ukuran layar (otomatis menyesuaikan PC / HP)
+local camera = workspace.CurrentCamera
+local function getViewport()
+	local v = camera and camera.ViewportSize
+	if not v or v.X < 100 or v.Y < 100 then
+		v = Vector2.new(1280, 720)
+	end
+	return v
+end
 
 -- 1. Layar hitam
 local bg = Instance.new("Frame")
@@ -34,52 +45,61 @@ bg.Active = true
 bg.Parent = gui
 tween(bg, 0.8, {BackgroundTransparency = 0}).Completed:Wait()
 
--- 2. Tulisan "Levian Hub" (per huruf)
+local vp = getViewport()
+local center = vp / 2
+
+-- 2. Tulisan "Levian Hub" (posisi dihitung manual, tidak pakai layout)
 local TEXT = "Levian Hub"
+local FONT = Enum.Font.GothamBold
 local PURPLE = Color3.fromRGB(190, 140, 255)
+local GAP = 2
 
-local holder = Instance.new("Frame")
-holder.BackgroundTransparency = 1
-holder.AnchorPoint = Vector2.new(0.5, 0.5)
-holder.Position = UDim2.fromScale(0.5, 0.5)
-holder.AutomaticSize = Enum.AutomaticSize.XY
-holder.Parent = bg
+-- Skala dasar mengikuti sisi terkecil layar
+local U = math.clamp(math.min(vp.X, vp.Y) / 720, 0.5, 1.5)
+local textSize = math.floor(56 * U)
 
-local layout = Instance.new("UIListLayout")
-layout.FillDirection = Enum.FillDirection.Horizontal
-layout.VerticalAlignment = Enum.VerticalAlignment.Center
-layout.Padding = UDim.new(0, 2)
-layout.Parent = holder
+local function measure(size)
+	local widths, total = {}, 0
+	for i = 1, #TEXT do
+		local w = TextService:GetTextSize(TEXT:sub(i, i), size, FONT, Vector2.new(1000, 1000)).X
+		widths[i] = w
+		total = total + w
+	end
+	total = total + GAP * (#TEXT - 1)
+	return widths, total
+end
 
-local letters = {}
+local widths, totalW = measure(textSize)
+-- Pastikan teks muat di layar (HP portrait)
+local maxW = vp.X * 0.88
+if totalW > maxW then
+	textSize = math.max(14, math.floor(textSize * maxW / totalW))
+	widths, totalW = measure(textSize)
+end
+
+local labelH = math.floor(textSize * 1.25)
+local letters, baseSizes = {}, {}
+local x = center.X - totalW / 2
 for i = 1, #TEXT do
+	local w = widths[i]
 	local l = Instance.new("TextLabel")
 	l.BackgroundTransparency = 1
 	l.Text = TEXT:sub(i, i)
-	l.Font = Enum.Font.GothamBold
-	l.TextSize = 56
+	l.Font = FONT
+	l.TextSize = textSize
 	l.TextColor3 = PURPLE
 	l.TextTransparency = 1
-	l.AutomaticSize = Enum.AutomaticSize.X
-	l.Size = UDim2.fromOffset(0, 60)
-	l.LayoutOrder = i
-	l.Parent = holder
-	letters[i] = l
-end
-
-RunService.RenderStepped:Wait()
-RunService.RenderStepped:Wait()
-
--- Bekukan posisi tiap huruf supaya bisa digerakkan bebas
-for _, l in ipairs(letters) do
-	local pos, size = l.AbsolutePosition, l.AbsoluteSize
-	l.AutomaticSize = Enum.AutomaticSize.None
-	l.Size = UDim2.fromOffset(size.X, size.Y)
+	l.TextWrapped = false
+	l.TextXAlignment = Enum.TextXAlignment.Center
+	l.TextYAlignment = Enum.TextYAlignment.Center
 	l.AnchorPoint = Vector2.new(0.5, 0.5)
-	l.Position = UDim2.fromOffset(pos.X + size.X / 2, pos.Y + size.Y / 2)
+	l.Size = UDim2.fromOffset(w, labelH)
+	l.Position = UDim2.fromOffset(x + w / 2, center.Y)
 	l.Parent = bg
+	letters[i] = l
+	baseSizes[i] = Vector2.new(w, labelH)
+	x = x + w + GAP
 end
-holder:Destroy()
 
 for i, l in ipairs(letters) do
 	task.delay(i * 0.08, function()
@@ -88,9 +108,8 @@ for i, l in ipairs(letters) do
 end
 task.wait(#letters * 0.08 + 1)
 
--- 3. Susun logo dari Frame
-local S = 1.2 -- ukuran logo (ubah sesuka kamu)
-local center = bg.AbsoluteSize / 2
+-- 3. Susun logo dari Frame (otomatis muat di layar)
+local S = math.clamp(math.min(vp.X * 0.5 / 204, vp.Y * 0.5 / 275), 0.4, 1.6)
 
 local logo = Instance.new("Frame")
 logo.BackgroundTransparency = 1
@@ -100,7 +119,7 @@ logo.Size = UDim2.fromOffset(204 * S, 275 * S)
 logo.Parent = bg
 
 local bars = {}
-local function bar(cx, cy, w, h, rot, isDot)
+local function bar(cx, cy, w, h, rot)
 	local f = Instance.new("Frame")
 	f.AnchorPoint = Vector2.new(0.5, 0.5)
 	f.Position = UDim2.fromOffset(cx * S, cy * S)
@@ -121,20 +140,20 @@ local function bar(cx, cy, w, h, rot, isDot)
 
 	local st = Instance.new("UIStroke")
 	st.Color = Color3.fromRGB(170, 100, 255)
-	st.Thickness = 4
+	st.Thickness = math.max(2, 4 * S)
 	st.Transparency = 1
 	st.Parent = f
 
 	f.Parent = logo
-	table.insert(bars, {frame = f, stroke = st, dot = isDot})
+	table.insert(bars, {frame = f, stroke = st})
 	return f
 end
 
-bar(13, 92, 26, 185)            -- L: garis tegak kiri
-bar(102, 166.5, 204, 26, -2.9)  -- garis horizontal
-bar(96.5, 162.5, 26, 197)       -- H: tegak tengah
-bar(179.5, 186, 26, 178)        -- H: tegak kanan
-bar(96.5, 167, 17, 17, 0, true) -- titik tengah
+bar(13, 92, 26, 185)           -- L: garis tegak kiri
+bar(102, 166.5, 204, 26, -2.9) -- garis horizontal
+bar(96.5, 162.5, 26, 197)      -- H: tegak tengah
+bar(179.5, 186, 26, 178)       -- H: tegak kanan
+bar(96.5, 167, 17, 17, 0)      -- titik tengah
 
 -- Target huruf L dan H di posisi logo
 local topLeft = Vector2.new(center.X - 102 * S, center.Y - 137.5 * S)
@@ -147,19 +166,25 @@ for i, l in ipairs(letters) do
 end
 task.wait(0.4)
 
+-- Huruf membesar mengikuti skala logo
+local targetTextSize = math.floor(75 * S)
+local ratio = targetTextSize / textSize
 local move = TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut)
+
 TweenService:Create(letters[Lidx], move, {
 	Position = UDim2.fromOffset(topLeft.X + 13 * S, topLeft.Y + 92 * S),
-	TextSize = 90,
+	TextSize = targetTextSize,
+	Size = UDim2.fromOffset(baseSizes[Lidx].X * ratio, baseSizes[Lidx].Y * ratio),
 }):Play()
 TweenService:Create(letters[Hidx], move, {
 	Position = UDim2.fromOffset(topLeft.X + 138 * S, topLeft.Y + 175 * S),
-	TextSize = 90,
+	TextSize = targetTextSize,
+	Size = UDim2.fromOffset(baseSizes[Hidx].X * ratio, baseSizes[Hidx].Y * ratio),
 }):Play()
 
 task.wait(0.7)
 
--- Letter memudar, logo menyala
+-- Huruf memudar, logo menyala
 tween(letters[Lidx], 0.5, {TextTransparency = 1})
 tween(letters[Hidx], 0.5, {TextTransparency = 1})
 for _, b in ipairs(bars) do
