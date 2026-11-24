@@ -25,6 +25,8 @@ local CONFIG = {
 	ClaimButtonPath = "RightHud.Main.RightUI.Quests.ClaimAll.Claim.Button",
 	QuestListPath = "RightHud.Main.RightUI.Quests.List",
 	Areas = { "Spawn", "Sky Island", "Autumn", "Mushroom", "Desert", "Crystal Cave", "Shadow Realm", "Volcano", "Heaven" },
+	Eggs2 = { "Dead Man's Hand", "Deadeye", "Dustbone Wendigo", "Glacier Egg", "Grove Egg", "High Noon", "Jurassic Egg", "Medieval Egg", "Permafrost Egg", "Rift Egg", "Royal Egg", "Wild West Egg" },
+	AreaAliases = { Spawn = { "Main", "Start", "Hub", "Home", "Lobby" } },
 	RebirthOptionsPath = "RightHud.Main.RightUI.Rebirths.List.Options",
 	Eggs = { "30M Egg", "Basic Egg", "Cactus Egg", "Crystal Egg", "Draconic Egg", "Geode Egg", "Heaven Egg", "Mushroom Egg", "Mycelium Egg", "Nimbus Egg", "Pumpkin Egg", "Sky Egg", "Spiked Egg", "Spotted Egg", "Void Egg", "Volcanic Egg" },
 }
@@ -471,6 +473,7 @@ local State = {
 	RebirthMax = 9,
 	Hatch = false,
 	Area = "Spawn",
+	WorldChoice = "Auto",
 	EggPick = "(dari hatch manual)",
 	AutoTP = true,
 	HatchCount = 1,
@@ -478,6 +481,8 @@ local State = {
 	QuestDelay = 2,
 	ClaimDelay = 2,
 }
+
+local currentWorld = "World 1"
 
 local Status, LastStatus = {}, {}
 local function setStatus(key, txt)
@@ -881,6 +886,16 @@ for _, n in ipairs(CONFIG.Areas) do
 	areaByNorm[norm(n)] = n
 end
 
+-- posisi area disimpan terpisah per world (nama area bisa sama di dua world)
+local function areaKey(name)
+	return "area:" .. name .. (currentWorld == "World 2" and "@w2" or "")
+end
+
+local function rootPart()
+	local c = LP.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
 -- samakan gaya penulisan nama area dengan contoh yang dikirim game ("Desert", "desert", "sky_island", ...)
 local function styled(name, sample)
 	local pascal = (string.gsub(name, "%s+", ""))
@@ -894,38 +909,114 @@ local function styled(name, sample)
 	return pascal
 end
 
-local function subst(v, name)
-	if type(v) == "string" and areaByNorm[norm(v)] then
-		return styled(name, v), true
+-- cari satu string nama area di dalam argumen Travel asli
+local function findSample(v)
+	if type(v) == "string" then
+		return areaByNorm[norm(v)] and v or nil
 	elseif type(v) == "table" then
-		local out, any = {}, false
-		for k, x in pairs(v) do
-			local nx, ch = subst(x, name)
-			out[k] = nx
-			any = any or ch
+		for _, x in pairs(v) do
+			local r = findSample(x)
+			if r then
+				return r
+			end
 		end
-		return out, any
 	end
-	return v, false
+	return nil
 end
 
--- pakai argumen Travel asli (dari perjalanan manual Anda), nama area diganti
+-- semua kemungkinan penulisan nama area (Sky Island, SkyIsland, skyisland, sky_island, ...)
+local function nameVariants(name, sample)
+	local words = {}
+	for w in string.gmatch(name, "%S+") do
+		words[#words + 1] = w
+	end
+	local joined = table.concat(words)
+	local snake = table.concat(words, "_")
+	local kebab = table.concat(words, "-")
+	local list, seen = {}, {}
+	local function add(v)
+		if v and v ~= "" and not seen[v] then
+			seen[v] = true
+			list[#list + 1] = v
+		end
+	end
+	if sample then
+		add(styled(name, sample))
+	end
+	add(name)
+	add(joined)
+	add(lower(joined))
+	add(lower(words[1]) .. string.sub(joined, #words[1] + 1)) -- skyIsland
+	add(snake)
+	add(lower(snake))
+	add(string.upper(snake))
+	add(kebab)
+	add(lower(kebab))
+	if #words > 1 then
+		add(words[1])
+		add(words[#words])
+	end
+	for _, alias in ipairs(CONFIG.AreaAliases[name] or {}) do
+		add(alias)
+	end
+	return list
+end
+
+local function subst(v, variant)
+	if type(v) == "string" and areaByNorm[norm(v)] then
+		return variant
+	elseif type(v) == "table" then
+		local out = {}
+		for k, x in pairs(v) do
+			out[k] = subst(x, variant)
+		end
+		return out
+	end
+	return v
+end
+
+local function looksOk(res)
+	if res == nil or res == false then
+		return false
+	end
+	if type(res) == "table" and (res.ok == false or res.success == false or res.Success == false or res.error ~= nil or res.Error ~= nil) then
+		return false
+	end
+	return true
+end
+
+-- pakai argumen Travel asli (dari perjalanan manual Anda), coba beberapa penulisan nama area;
+-- dianggap berhasil kalau karakter benar-benar berpindah
 local function travelViaRemote(name)
 	for _, r in ipairs({ R.TravelWorld, R.TravelIsland }) do
 		local a = r and Learned[r]
 		if a then
-			local args, changed = {}, false
+			local sample
 			for i = 1, a.n do
-				local nv, ch = subst(a[i], name)
-				args[i] = nv
-				changed = changed or ch
+				sample = sample or findSample(a[i])
 			end
-			if changed then
-				local ok, res = pcall(function()
-					return r:InvokeServer(table.unpack(args, 1, a.n))
-				end)
-				if ok then
-					return true, "via " .. r.Name .. " -> " .. ser(res)
+			if sample then
+				for _, variant in ipairs(nameVariants(name, sample)) do
+					local args = {}
+					for i = 1, a.n do
+						args[i] = subst(a[i], variant)
+					end
+					local rp0 = rootPart()
+					local before = rp0 and rp0.Position
+					local ok, res = pcall(function()
+						return r:InvokeServer(table.unpack(args, 1, a.n))
+					end)
+					if ok and looksOk(res) and before then
+						local t0 = os.clock()
+						while os.clock() - t0 < 2.5 do
+							local rp = rootPart()
+							if rp and (rp.Position - before).Magnitude > 30 then
+								task.wait(1.5)
+								return true, "via " .. r.Name .. " (" .. variant .. ")"
+							end
+							task.wait(0.2)
+						end
+					end
 				end
 			end
 		end
@@ -963,29 +1054,71 @@ local function findAreaPos(name)
 	return best, bestPath
 end
 
-local function tpArea(name)
+local function saveAreaPos(name, pos)
+	env.TapSimAllPos[PLACE][lower(areaKey(name))] = { pos.X, pos.Y, pos.Z }
+	persistPos()
+end
+
+-- terakhir untuk Spawn: reset karakter lalu simpan posisi saat respawn
+local function respawnToSpawn()
 	local char = LP.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return false
+	end
+	local newChar
+	local conn = LP.CharacterAdded:Connect(function(c)
+		newChar = c
+	end)
+	hum.Health = 0
+	local t0 = os.clock()
+	while not newChar and os.clock() - t0 < 20 do
+		task.wait(0.2)
+	end
+	conn:Disconnect()
+	if not newChar then
+		return false
+	end
+	local root = newChar:WaitForChild("HumanoidRootPart", 10)
 	if not root then
+		return false
+	end
+	task.wait(1)
+	saveAreaPos("Spawn", root.Position)
+	return true
+end
+
+local function tpArea(name)
+	if not rootPart() then
 		return false, "karakter tidak ada"
 	end
 	local function moveTo(pos, up)
-		root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-		root.CFrame = CFrame.new(pos + Vector3.new(0, up, 0))
+		local rp = rootPart()
+		if rp then
+			rp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			rp.CFrame = CFrame.new(pos + Vector3.new(0, up, 0))
+		end
 	end
-	local sp = savedPos("area:" .. name)
+	local sp = savedPos(areaKey(name))
 	if sp then
 		moveTo(sp, 2)
 		return true, "posisi tersimpan"
 	end
 	local ok, msg = travelViaRemote(name)
 	if ok then
-		return true, msg
+		local rp = rootPart()
+		if rp then
+			saveAreaPos(name, rp.Position)
+		end
+		return true, msg .. ", posisi disimpan"
 	end
 	local p, path = findAreaPos(name)
 	if p then
 		moveTo(p, 5)
 		return true, "objek " .. path
+	end
+	if name == "Spawn" and respawnToSpawn() then
+		return true, "respawn, posisi spawn disimpan"
 	end
 	return false, "belum ada posisi: datangi area itu lalu tekan Simpan Posisi"
 end
@@ -1079,6 +1212,20 @@ local function diagnose()
 		end
 	else
 		add("(daftar quest tidak ditemukan)")
+	end
+
+	add("== WORLD ==")
+	add("PlaceId=" .. tostring(game.PlaceId) .. " JobId=" .. tostring(game.JobId) .. " PrivateServerId=" .. tostring(game.PrivateServerId))
+	add("pilihan=" .. tostring(State.WorldChoice) .. " aktif=" .. currentWorld)
+	pcall(function()
+		add("JoinData: " .. ser(LP:GetJoinData()))
+	end)
+	for _, holder in ipairs({ workspace, RS, LP }) do
+		pcall(function()
+			for k, v in pairs(holder:GetAttributes()) do
+				add("atribut " .. holder.Name .. "." .. k .. " = " .. tostring(v))
+			end
+		end)
 	end
 
 	add("== TP EGG ==")
@@ -1234,13 +1381,75 @@ secEgg.CreateToggle({ Title = "Auto Hatch Telur", Desc = "Hatch otomatis telur t
 		loop("Hatch", doHatch, "HatchDelay")
 	end
 end)
-local eggList = { "(dari hatch manual)" }
-for _, n in ipairs(eggsOverride or CONFIG.Eggs) do
-	eggList[#eggList + 1] = n
+local function buildEggList(world)
+	local l = { "(dari hatch manual)" }
+	for _, n in ipairs(world == "World 2" and CONFIG.Eggs2 or CONFIG.Eggs) do
+		l[#l + 1] = n
+	end
+	return l
 end
-secEgg.CreateDropdown({ Title = "Pilih Telur", List = eggList, Search = true, Default = eggList[1] }, function(v)
+
+-- world awal: dari tapsim2.lua, pilihan tersimpan (halaman Setting), atau Auto
+local WORLD_FILE = "TapSim_world.txt"
+local savedWorld
+pcall(function()
+	if isfile and readfile and isfile(WORLD_FILE) then
+		savedWorld = trim(readfile(WORLD_FILE))
+	end
+end)
+if savedWorld ~= "Auto" and savedWorld ~= "World 1" and savedWorld ~= "World 2" then
+	savedWorld = nil
+end
+local worldChoice = eggsOverride and "World 2" or savedWorld or "Auto"
+currentWorld = worldChoice == "World 2" and "World 2" or "World 1"
+
+local eggDrop = secEgg.CreateDropdown({ Title = "Pilih Telur", List = buildEggList(currentWorld), Search = true, Default = "(dari hatch manual)" }, function(v)
 	State.EggPick = v
 end)
+
+local function applyWorld(w)
+	if w == currentWorld then
+		return
+	end
+	currentWorld = w
+	eggDrop.Refresh(buildEggList(w))
+	eggDrop.SetValue("(dari hatch manual)")
+	UI.CreateNoti({ Title = "World", Desc = "List egg: " .. w, ShowTime = 3 })
+end
+
+-- deteksi world dari objek egg yang ada di workspace
+local function worldWants(list)
+	local want = {}
+	for _, n in ipairs(list) do
+		want[norm(n)] = true
+		want[norm(n) .. "egg"] = true
+	end
+	return want
+end
+
+local function autoDetect()
+	local w1, w2 = worldWants(CONFIG.Eggs), worldWants(CONFIG.Eggs2)
+	local s1, s2 = 0, 0
+	for i, o in ipairs(workspace:GetDescendants()) do
+		if o:IsA("Model") or o:IsA("BasePart") then
+			local n = norm(o.Name)
+			if w1[n] then
+				s1 = s1 + 1
+			end
+			if w2[n] then
+				s2 = s2 + 1
+			end
+		end
+		if i % 4000 == 0 then
+			task.wait()
+		end
+	end
+	if s1 == s2 then
+		UI.CreateNoti({ Title = "World", Desc = "Tidak terdeteksi, pilih manual di Setting", ShowTime = 4 })
+		return
+	end
+	applyWorld(s2 > s1 and "World 2" or "World 1")
+end
 secEgg.CreateDropdown({ Title = "Jumlah per Hatch", List = { "1", "3", "8" }, Default = "1" }, function(v)
 	State.HatchCount = tonumber(v) or 1
 end)
@@ -1307,15 +1516,28 @@ secTele.CreateButton({ Title = "Simpan Posisi Saya (Area Terpilih)" }, function(
 		UI.CreateNoti({ Title = "Simpan Posisi", Desc = "Karakter belum siap", ShowTime = 3 })
 		return
 	end
-	local p = root.Position
-	env.TapSimAllPos[PLACE]["area:" .. lower(State.Area)] = { p.X, p.Y, p.Z }
-	persistPos()
+	saveAreaPos(State.Area, root.Position)
 	setStatus("Tele", "Posisi " .. State.Area .. " tersimpan")
 	UI.CreateNoti({ Title = "Posisi tersimpan", Desc = State.Area, ShowTime = 3 })
 end)
 Status.Tele = secTele.CreateLabel({ Title = "Teleport: -" })
 
 local Setting = Main:CreatePage({ Page_Name = "Setting", Page_Title = "Setting" })
+local secWorld = Setting.CreateSection("World")
+secWorld.CreateDropdown({ Title = "World", List = { "Auto", "World 1", "World 2" }, Default = worldChoice }, function(v)
+	State.WorldChoice = v
+	pcall(function()
+		if writefile then
+			writefile(WORLD_FILE, v)
+		end
+	end)
+	if v == "Auto" then
+		task.spawn(autoDetect)
+	else
+		applyWorld(v)
+	end
+end)
+
 local secMenu = Setting.CreateSection("Menu")
 secMenu.CreateToggle({ Title = "Sembunyikan Menu Otomatis", Desc = "Sembunyikan menu saat fitur dinyalakan", Default = false }, function(v)
 	State.AutoHide = v
