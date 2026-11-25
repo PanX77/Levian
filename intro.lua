@@ -169,11 +169,6 @@ sub.Size = UDim2.fromOffset(subW, math.floor(subSize * 1.4))
 sub.Position = UDim2.fromOffset(center.X, center.Y + labelH * 0.5 + subSize * 0.9)
 sub.ZIndex = 3
 sub.Parent = bg
-do
-	local sg = Instance.new("UIGradient")
-	sg.Color = ColorSequence.new(colorAt(0.2), colorAt(0.8))
-	sg.Parent = sub
-end
 
 for i, l in ipairs(letters) do
 	task.delay(i * 0.08, function()
@@ -182,7 +177,7 @@ for i, l in ipairs(letters) do
 end
 -- "Free Version" muncul pelan setelah "Levian Hub" tampil
 task.delay(#letters * 0.08 + 0.1, function()
-	tween(sub, 0.6, {TextTransparency = 0.15}, Enum.EasingStyle.Sine)
+	tween(sub, 0.6, {TextTransparency = 0}, Enum.EasingStyle.Sine)
 end)
 task.wait(#letters * 0.08 + 1.1)
 

@@ -25,4 +25,8 @@ if file then
 	loadstring(game:HttpGet(base .. file))()
 else
 	warn("Game not supported yet: " .. tostring(game.PlaceId))
+	-- Tampilkan UI "Game not support yet" + tombol Request game script
+	pcall(function()
+		loadstring(game:HttpGet(base .. "unsupported.lua"))()
+	end)
 end
