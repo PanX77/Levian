@@ -151,12 +151,40 @@ for i = 1, #TEXT do
 	x = x + w + GAP
 end
 
+-- Tulisan "Free Version" di bawah "Levian Hub"
+local subSize = math.max(12, math.floor(textSize * 0.34))
+local sub = Instance.new("TextLabel")
+sub.BackgroundTransparency = 1
+sub.Text = "Free Version"
+sub.Font = Enum.Font.GothamMedium
+sub.TextSize = subSize
+sub.TextColor3 = Color3.new(1, 1, 1)
+sub.TextTransparency = 1
+sub.TextWrapped = false
+sub.TextXAlignment = Enum.TextXAlignment.Center
+sub.TextYAlignment = Enum.TextYAlignment.Center
+sub.AnchorPoint = Vector2.new(0.5, 0.5)
+local subW = TextService:GetTextSize("Free Version", subSize, Enum.Font.GothamMedium, Vector2.new(1000, 1000)).X + 6
+sub.Size = UDim2.fromOffset(subW, math.floor(subSize * 1.4))
+sub.Position = UDim2.fromOffset(center.X, center.Y + labelH * 0.5 + subSize * 0.9)
+sub.ZIndex = 3
+sub.Parent = bg
+do
+	local sg = Instance.new("UIGradient")
+	sg.Color = ColorSequence.new(colorAt(0.2), colorAt(0.8))
+	sg.Parent = sub
+end
+
 for i, l in ipairs(letters) do
 	task.delay(i * 0.08, function()
 		tween(l, 0.45, {TextTransparency = 0}, Enum.EasingStyle.Sine)
 	end)
 end
-task.wait(#letters * 0.08 + 0.9)
+-- "Free Version" muncul pelan setelah "Levian Hub" tampil
+task.delay(#letters * 0.08 + 0.1, function()
+	tween(sub, 0.6, {TextTransparency = 0.15}, Enum.EasingStyle.Sine)
+end)
+task.wait(#letters * 0.08 + 1.1)
 
 -- 3. Siapkan logo (di dalam group supaya bisa mengecil + terbang sekaligus)
 local S = math.clamp(math.min(vp.X * 0.5 / 204, vp.Y * 0.5 / 275), 0.4, 1.6)
@@ -262,6 +290,7 @@ bar(96.5, 167, 17, 17, 0)      -- titik tengah
 local topLeft = Vector2.new(center.X - 102 * S, center.Y - 137.5 * S)
 local Lidx, Hidx = 1, 8
 
+tween(sub, 0.5, {TextTransparency = 1}, Enum.EasingStyle.Sine)
 for i, l in ipairs(letters) do
 	if i ~= Lidx and i ~= Hidx then
 		tween(l, 0.7, {TextTransparency = 1}, Enum.EasingStyle.Sine)
