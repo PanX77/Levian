@@ -1,4 +1,3 @@
--- Levian Hub: UI "Game not support yet" + tombol Request game script
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
