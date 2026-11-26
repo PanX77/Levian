@@ -1,19 +1,5 @@
 --[[
-	LevianUI - library UI sederhana untuk Roblox (tanpa akses web)
-	Isi: Window, Page(tab), Section, Toggle(saklar), Button, Label, Slider,
-	     Dropdown(+search/multi), Box(input), Bind(keybind), Notifikasi.
-
-	Contoh pakai:
-		local UI   = loadstring(readfile("LevianUI.lua"))()
-		local Main = UI.CreateMain({ Title = "Blox Fruit", Desc = " - Blox Fruit" })
-		local Page = Main:CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
-		local Sec  = Page.CreateSection("Auto Farm")
-		Sec.CreateToggle({ Title = "Auto Farm", Desc = "Farm otomatis", Default = false }, function(v) print(v) end)
-		Sec.CreateSlider({ Title = "Delay", Min = 0, Max = 5, Default = 1, Precise = true }, function(v) print(v) end)
-		Sec.CreateDropdown({ Title = "Metode", List = {"A","B"}, Search = true }, function(v) print(v) end)
-		UI.CreateNoti({ Title = "Halo", Desc = "UI siap", ShowTime = 3 })
-
-	Semua method boleh dipanggil dengan titik (obj.CreateX(...)) atau titik dua (obj:CreateX(...)).
+	LevianUI - library UI
 ]]
 
 local Library = {}
