@@ -10,7 +10,6 @@ local function tween(obj, t, props, style, dir)
 	return tw
 end
 
--- Parent GUI (aman untuk executor)
 local parent
 pcall(function() parent = gethui and gethui() end)
 if not parent then
@@ -26,14 +25,13 @@ gui.DisplayOrder = 999999
 pcall(function() gui.ScreenInsets = Enum.ScreenInsets.None end)
 gui.Parent = parent
 
--- Warna gradient (sama dengan logo)
 local C_LIGHT = Color3.fromRGB(205, 160, 255)
 local C_DARK = Color3.fromRGB(135, 65, 245)
 local function colorAt(t)
 	return C_LIGHT:Lerp(C_DARK, math.clamp(t, 0, 1))
 end
 
--- 1. Layar hitam
+-- 1
 local bg = Instance.new("Frame")
 bg.Size = UDim2.fromScale(1, 1)
 bg.BackgroundColor3 = Color3.new(0, 0, 0)
@@ -42,7 +40,6 @@ bg.BorderSizePixel = 0
 bg.Active = true
 bg.Parent = gui
 
--- Glow biru tipis di pinggir layar (4 sisi, memudar ke tengah)
 local edgeVp = bg.AbsoluteSize
 if edgeVp.X < 100 or edgeVp.Y < 100 then
 	local cam = workspace.CurrentCamera
@@ -80,7 +77,7 @@ for _, e in ipairs(edges) do
 end
 tween(bg, 0.8, {BackgroundTransparency = 0}).Completed:Wait()
 
--- Ukuran layar (otomatis PC / HP)
+-- Ukuran layar
 local vp = bg.AbsoluteSize
 if vp.X < 100 or vp.Y < 100 then
 	local cam = workspace.CurrentCamera
@@ -88,7 +85,7 @@ if vp.X < 100 or vp.Y < 100 then
 end
 local center = vp / 2
 
--- 2. Tulisan "Levian Hub" (posisi dihitung manual, warna gradient menyambung)
+-- 2
 local TEXT = "Levian Hub"
 local FONT = Enum.Font.GothamBold
 local GAP = 2
@@ -136,7 +133,6 @@ for i = 1, #TEXT do
 	l.ZIndex = 3
 	l.Parent = bg
 
-	-- gradient menyambung dari huruf pertama sampai terakhir
 	local g = Instance.new("UIGradient")
 	g.Color = ColorSequence.new(
 		colorAt((x - startX) / totalW),
@@ -149,7 +145,6 @@ for i = 1, #TEXT do
 	x = x + w + GAP
 end
 
--- Tulisan "Free Version" di bawah "Levian Hub"
 local subSize = math.max(12, math.floor(textSize * 0.34))
 local sub = Instance.new("TextLabel")
 sub.BackgroundTransparency = 1
@@ -173,15 +168,14 @@ for i, l in ipairs(letters) do
 		tween(l, 0.45, {TextTransparency = 0}, Enum.EasingStyle.Sine)
 	end)
 end
--- "Free Version" muncul pelan setelah "Levian Hub" tampil
 task.delay(#letters * 0.08 + 0.1, function()
 	tween(sub, 0.6, {TextTransparency = 0}, Enum.EasingStyle.Sine)
 end)
 task.wait(#letters * 0.08 + 1.1)
 
--- 3. Siapkan logo (di dalam group supaya bisa mengecil + terbang sekaligus)
+-- 3
 local S = math.clamp(math.min(vp.X * 0.5 / 204, vp.Y * 0.5 / 275), 0.4, 1.6)
-local GSIZE = 640 * S -- ukuran group (logo = ~43% dari lingkaran, sama seperti ikon bulat)
+local GSIZE = 640 * S
 
 local group = Instance.new("Frame")
 group.BackgroundTransparency = 1
@@ -195,7 +189,6 @@ local gscale = Instance.new("UIScale")
 gscale.Scale = 1
 gscale.Parent = group
 
--- Lingkaran gelap (muncul saat logo menuju tombol bulat)
 local circle = Instance.new("Frame")
 circle.AnchorPoint = Vector2.new(0.5, 0.5)
 circle.Position = UDim2.fromOffset(GSIZE / 2 - 5 * S, GSIZE / 2 - 10 * S)
@@ -229,7 +222,6 @@ barHolder.Parent = logo
 
 local bars, glows = {}, {}
 local function bar(cx, cy, w, h, rot)
-	-- lapisan glow (lembut, di belakang)
 	local glow = Instance.new("Frame")
 	glow.AnchorPoint = Vector2.new(0.5, 0.5)
 	glow.Position = UDim2.fromOffset(cx * S, cy * S)
@@ -244,7 +236,6 @@ local function bar(cx, cy, w, h, rot)
 	gc.Parent = glow
 	table.insert(glows, glow)
 
-	-- batang logo
 	local f = Instance.new("Frame")
 	f.AnchorPoint = Vector2.new(0.5, 0.5)
 	f.Position = UDim2.fromOffset(cx * S, cy * S)
@@ -279,7 +270,7 @@ bar(96.5, 162.5, 26, 197)      -- H: tegak tengah
 bar(179.5, 186, 26, 178)       -- H: tegak kanan
 bar(96.5, 167, 17, 17, 0)      -- titik tengah
 
--- 4. L & H bergeser menyatu ke posisi logo (halus), huruf lain memudar
+-- 4
 local topLeft = Vector2.new(center.X - 102 * S, center.Y - 137.5 * S)
 local Lidx, Hidx = 1, 8
 
@@ -307,7 +298,6 @@ TweenService:Create(letters[Hidx], move, {
 	Size = UDim2.fromOffset(baseSizes[Hidx].X * ratio, baseSizes[Hidx].Y * ratio),
 }):Play()
 
--- Crossfade: logo menyala pelan selagi huruf L & H hampir sampai
 task.wait(MOVE_T * 0.55)
 local SOFT = Enum.EasingStyle.Sine
 tween(letters[Lidx], 0.9, {TextTransparency = 1}, SOFT, Enum.EasingDirection.InOut)
@@ -321,7 +311,6 @@ for _, g in ipairs(glows) do
 end
 task.wait(MOVE_T * 0.45 + 0.5)
 
--- Denyut glow sekali (nafas)
 for _, g in ipairs(glows) do
 	TweenService:Create(g, TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, 1, true), {
 		BackgroundTransparency = 0.78,
@@ -329,13 +318,12 @@ for _, g in ipairs(glows) do
 end
 task.wait(1.5)
 
--- 5. Logo mengecil & terbang ke tombol bulat LevianUI (kiri layar)
+-- 5
 local inset = Vector2.new(0, 36)
 pcall(function()
 	local tl = GuiService:GetGuiInset()
 	inset = tl
 end)
--- Tombol bulat: ukuran 40x40, Position (0,10, 0.4,0) di ScreenGui yang menghormati inset
 local fabCenter = Vector2.new(10 + 20, inset.Y + 0.4 * (vp.Y - inset.Y) + 20)
 local endScale = 40 / GSIZE
 
@@ -350,10 +338,10 @@ end
 for _, b in ipairs(bars) do
 	tween(b.stroke, 0.6, {Transparency = 1}, SOFT)
 end
--- layar tetap hitam selama logo terbang; tunggu sampai logo mendarat
+
 task.wait(1.45)
 
--- 6. Logo sudah di posisi: tunggu tombol bulat asli muncul (maks 4 detik)
+-- 6
 local function fabExists()
 	local getters = {
 		function() return gethui() end,
@@ -375,14 +363,13 @@ while not fabExists() and os.clock() - t0 < 4 do
 end
 task.wait(0.15)
 
--- 7. Layar hitam (plus glow pinggir) dan logo mulai hilang bersamaan
+-- 7
 local FADE_T = 1.1
 local FADE = Enum.EasingDirection.InOut
 tween(bg, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
 for _, e in ipairs(edges) do
 	tween(e, FADE_T, {BackgroundTransparency = 1}, SOFT, FADE)
 end
--- Logo hilang lebih cepat dari layar hitam (ubah LOGO_FADE_T kalau mau)
 local LOGO_FADE_T = 0.45
 tween(circle, LOGO_FADE_T, {BackgroundTransparency = 1}, SOFT, Enum.EasingDirection.Out)
 for _, b in ipairs(bars) do
