@@ -11,12 +11,9 @@ local games = {
 	[72858262610964] = "tapsim.lua", -- Tap Simulator reborn
 	[7871169780] = "minesweeper.lua", -- bLockerman's Minesweeper
 
-	-- [ID_GAME_BARU] = "namagame.lua",
 }
 local file = games[game.PlaceId]
 if file then
-	-- Intro jalan bersamaan dengan script game, supaya logo bisa mendarat
-	-- tepat di tombol bulat saat UI selesai dibuat (kalau intro gagal, game tetap jalan)
 	task.spawn(function()
 		pcall(function()
 			loadstring(game:HttpGet(base .. "intro.lua"))()
@@ -25,7 +22,6 @@ if file then
 	loadstring(game:HttpGet(base .. file))()
 else
 	warn("Game not supported yet: " .. tostring(game.PlaceId))
-	-- Tampilkan UI "Game not support yet" + tombol Request game script
 	pcall(function()
 		loadstring(game:HttpGet(base .. "unsupported.lua"))()
 	end)
