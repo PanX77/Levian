@@ -1,6 +1,4 @@
--- Levian Hub Intro (responsive: PC & HP)
--- Alur: layar hitam -> "Levian Hub" (gradient) -> L & H menyatu jadi logo
---       -> logo mengecil & terbang ke tombol bulat LevianUI
+-- Levian Hub Intro
 local TweenService = game:GetService("TweenService")
 local TextService = game:GetService("TextService")
 local GuiService = game:GetService("GuiService")
