@@ -1,25 +1,5 @@
 --[[
-	Levian Hub - Final Swarm (v22)
-	Call order recorded from the game's own menu:
-	  WorldSelection.RemoteEvent    Fire("SetRunMode", "Normal")
-	  WorldSelection.RemoteEvent    Fire("SetWorld", <map>)
-	  WorldSelection.RemoteEvent    Fire("SetDifficulty", <Normal|Hard|Nightmare>)
-	  WorldSelection.RemoteEvent    Fire("SetChallenges", {<ids>})
-	  WorldSelection.RemoteFunction Invoke("EnterQueue")  -> true
-	  QueueService.RemoteEvent      Fire("PartySizeSelected", <1-4>)
-	  QueueService.RemoteEvent      Fire("Created")
-	Raid (recorded for Colosseum / SandWorm):
-	  RaidQueueService.RemoteEvent    Fire("SelectRaid", <raid>)
-	  WorldSelection.RemoteEvent      Fire("SetDifficulty", <difficulty>)
-	  RaidQueueService.RemoteFunction Invoke("EnterQueue")  -> true
-	  RaidQueueService.RemoteEvent    Fire("PartySizeSelected", <1-4>)
-	  RaidQueueService.RemoteEvent    Fire("Created")
-	Dungeon (recorded):
-	  DungeonQueueService.RemoteFunction Invoke("GetFloorLimit")      -> highest unlocked floor
-	  DungeonQueueService.RemoteFunction Invoke("EnterQueue", <floor>) -> true
-	  DungeonQueueService.RemoteEvent    Fire("PartySizeSelected", <1-4>)
-	  DungeonQueueService.RemoteEvent    Fire("Created")
-	The game starts automatically after the queue is created.
+	Levian Hub - Final Swarm
 ]]
 
 local HttpService = game:GetService("HttpService")
