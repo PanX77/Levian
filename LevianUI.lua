@@ -18,9 +18,7 @@ local Theme = {
 	Off = Color3.fromRGB(72, 72, 84),
 }
 
-Library.GuiName = "Levian Hub GUI" -- nama ScreenGui utama (dipakai script untuk Toggle GUI)
--- Logo of the floating button. Either an http(s) link to a PNG (downloaded once per run, needs
--- writefile + getcustomasset) or a Roblox asset id such as "rbxassetid://123". Failure keeps the "X".
+Library.GuiName = "Levian Hub GUI"
 Library.LogoUrl = "https://levianstore.my.id/levian_logo.png"
 
 ---------------------------------------------------------------- helper
