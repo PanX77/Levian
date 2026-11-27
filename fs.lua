@@ -8,12 +8,10 @@ local RS = game:GetService("ReplicatedStorage")
 ---------------------------------------------------------------- saved settings
 local FOLDER = "Levian Hub"
 local FILE = FOLDER .. "/" .. game:GetService("Players").LocalPlayer.Name .. "-finalswarm.json"
-local OLD_FILE = "FinalSwarm/settings.json" -- location used by older versions
 local cfg = {
 	mode = "Solo",
 	difficulty = "Normal",
 	map = "Volcano",
-	created = true,
 	challenges = {},
 	raid = "None",
 	raidDifficulty = "Normal",
@@ -29,20 +27,17 @@ local cfg = {
 	banishList = {},
 	bubbleMode = "Safe",
 	bubbleName = "OxygenBubble",
-	bubbleStay = 5,
 	bubbleBelow = 80,
 	bubbleSpeed = 20,
 	walkRadius = 30,
 	riftMode = "Safe",
 	riftSpeed = 20,
 	riftStay = true,
-	riftName = "rift",
 	riftTargets = { "Rift", "Crystal", "Circle" },
 	pressMethod = "",
 	afterMatch = "Nothing",
 	afterDelay = 3,
 	autoExecute = false,
-	key = "",
 	autoMinimize = false,
 	flyMode = "Fly",
 	flyDistance = 30,
@@ -52,35 +47,15 @@ local cfg = {
 }
 pcall(function()
 	if isfile then
-		local src = (isfile(FILE) and FILE) or (isfile(OLD_FILE) and OLD_FILE) or nil
-		if src then
-			for k, v in pairs(HttpService:JSONDecode(readfile(src))) do
+		if isfile(FILE) then
+			for k, v in pairs(HttpService:JSONDecode(readfile(FILE))) do
 				cfg[k] = v
 			end
 		end
 	end
 end)
 
-cfg.created = true -- the "Created" signal is always sent (no UI toggle)
-
--- migrate values saved by older versions
-local OLD_MODE = { ["2 Pemain"] = "Duo", ["3 Pemain"] = "Trio", ["4 Pemain"] = "Squad" }
-cfg.mode = OLD_MODE[cfg.mode] or cfg.mode
-local OLD_CHALLENGE = {
-	["No Armor"] = "Barebones",
-	["1 HP"] = "Made Of Glass",
-	["Enemy Max"] = "Double Trouble",
-	["Player Nerfs"] = "Half Strength",
-	["Supdoggy Chase"] = "Supdoggy's Revenge",
-	["One Weapon"] = "One Handed",
-	["Inverted"] = "Dizzy Swarm",
-	["First Person"] = "POV You",
-}
-if type(cfg.challenges) == "table" then
-	for i, n in ipairs(cfg.challenges) do
-		cfg.challenges[i] = OLD_CHALLENGE[n] or n
-	end
-else
+if type(cfg.challenges) ~= "table" then
 	cfg.challenges = {}
 end
 
@@ -93,12 +68,10 @@ local function save()
 	end)
 end
 
----------------------------------------------------------------- UI library (own domain first, then GitHub)
+---------------------------------------------------------------- UI library
 local function loadUI()
 	local urls = {
 		"https://levianstore.my.id/LevianUI.lua",
-		"https://levianstore.my.id/BananaUI.lua", -- old file name, fallback until LevianUI.lua is uploaded
-		"https://raw.githubusercontent.com/PanX77/Bananaui/fe48e1c715ab1cf54a5c15b61d4f3c32070b5de3/BananaUI.lua",
 	}
 	for _, u in ipairs(urls) do
 		local ok, lib = pcall(function()
@@ -122,46 +95,6 @@ if not UI then
 	return
 end
 
--- logo of the floating button (also for older library versions that have no ApplyLogo)
-local LOGO_URL = "https://levianstore.my.id/levian_logo.png"
-local function applyLogoTo(b)
-	if not b or b:FindFirstChild("LevianLogo") then
-		return
-	end
-	if UI.ApplyLogo then
-		if UI.ApplyLogo(b) then
-			return
-		end
-	else
-		local ok = pcall(function()
-			local data = game:HttpGet(LOGO_URL)
-			if makefolder and isfolder and not isfolder("Levian Hub") then
-				makefolder("Levian Hub")
-			end
-			writefile("Levian Hub/logo.png", data)
-			local img = Instance.new("ImageLabel")
-			img.Name = "LevianLogo"
-			img.BackgroundTransparency = 1
-			img.Size = UDim2.new(1, 0, 1, 0)
-			img.Image = (getcustomasset or getsynasset)("Levian Hub/logo.png")
-			img.Parent = b
-			local c = Instance.new("UICorner")
-			c.CornerRadius = UDim.new(0, 20)
-			c.Parent = img
-			b.Text = ""
-			b.BackgroundTransparency = 1
-		end)
-		if ok then
-			return
-		end
-	end
-	if b.Text == "" or b.Text == "B" then
-		b.Text = "X"
-	end
-end
-
-
- 
 ---------------------------------------------------------------- remotes
 local function getRemotes()
 	local root
@@ -266,10 +199,8 @@ local function joinOnce()
 	end
 	task.wait(0.4)
 	r.qsEvent:FireServer("PartySizeSelected", size)
-	if cfg.created then
-		task.wait(0.3)
-		r.qsEvent:FireServer("Created")
-	end
+	task.wait(0.3)
+	r.qsEvent:FireServer("Created")
 	return true, ("Campaign: %s / %s / %s"):format(tostring(cfg.map), tostring(cfg.difficulty), tostring(cfg.mode))
 end
 
@@ -298,10 +229,8 @@ local function joinRaidOnce()
 	end
 	task.wait(0.4)
 	r.rqEvent:FireServer("PartySizeSelected", size)
-	if cfg.created then
-		task.wait(0.3)
-		r.rqEvent:FireServer("Created")
-	end
+	task.wait(0.3)
+	r.rqEvent:FireServer("Created")
 	return true, ("Raid: %s / %s / %s"):format(
 		tostring(cfg.raid), tostring(cfg.raidDifficulty), tostring(cfg.raidMode)
 	)
@@ -1572,7 +1501,7 @@ end
 -- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
 local reg, tog = {}, {}
 local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false, autoFarm = false }
-local SKIP = { pressMethod = true, key = true }
+local SKIP = { pressMethod = true }
 local function snapshot()
 	local copy = {}
 	for k, v in pairs(cfg) do
@@ -1610,31 +1539,13 @@ end
 
 ---------------------------------------------------------------- UI
 local Main = UI.CreateMain({ Title = "Levian Hub", Desc = " - Final Swarm" })
--- remove the close (x) button and use an X logo, in case the library on the server is an older version
-pcall(function()
-	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
-		if g then
-			for _, d in ipairs(g:GetDescendants()) do
-				if d:IsA("TextButton") and d.Text == "x" then
-					d:Destroy()
-				end
-			end
-		end
-		local t = root:FindFirstChild("LevianUI Toggle") or root:FindFirstChild("BananaUI Toggle")
-		local b = t and t:FindFirstChildWhichIsA("TextButton")
-		if b then
-			task.spawn(applyLogoTo, b)
-		end
-	end
-end)
 local PageA = Main.CreatePage({ Page_Name = "About Us", Page_Title = "About Us" })
 local SAb = PageA.CreateSection("About Us")
 SAb.CreateLabel({ Title = "Levian Hub" })
 -- centre the label (the library labels are left-aligned by default)
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		local g = root:FindFirstChild("Levian Hub GUI")
 		if g then
 			for _, d in ipairs(g:GetDescendants()) do
 				if d:IsA("TextLabel") and d.Text == "Levian Hub" then
@@ -2050,7 +1961,7 @@ SC.CreateLabel({ Title = "Save stores the whole menu, including the toggles that
 -- open the Lobby tab first (About Us is the first tab in the list)
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
-		local g = root:FindFirstChild("Levian Hub GUI") or root:FindFirstChild("Nousigi Hub GUI")
+		local g = root:FindFirstChild("Levian Hub GUI")
 		if g then
 			for _, d in ipairs(g:GetDescendants()) do
 				if d:IsA("TextButton") and d.Text == "Lobby" then
