@@ -10,6 +10,9 @@ local games = {
 	[79787558257549] = "fs.lua", -- final swarm
 	[72858262610964] = "tapsim.lua", -- Tap Simulator reborn
 	[7871169780] = "minesweeper.lua", -- bLockerman's Minesweeper
+	[17625359962] = "Rivals.lua", -- Rivals
+	[18126510175] = "Rivals.lua", -- Rivals (mobile)
+	[117398147513099] = "Rivals.lua", -- Rivals (Match)
 }
 
 
