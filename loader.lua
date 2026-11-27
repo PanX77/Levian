@@ -13,38 +13,114 @@ local games = {
 
 	-- [ID_GAME_BARU] = "namagame.lua",
 }
+
+--------------------------------------------------------------------
 -- Pengaturan intro
--- true  = intro hanya muncul SEKALI saja (pertama kali execute, disimpan di file executor)
--- false = intro muncul sekali per sesi (hilang kalau game/executor ditutup)
-local INTRO_ONCE_EVER = true
-local INTRO_FLAG_FILE = "LevianHub/intro_seen.txt"
+-- File: workspace/Levian Hub/Intro_LevianHub.txt
+--   Intro=true   -> intro tampil (sekali setiap Roblox dibuka)
+--   Intro=false  -> intro dimatikan
+-- File ini tidak pernah dihapus dan nilai "Intro" tidak pernah diubah
+-- oleh script, jadi pengguna bebas mengaktifkan/menonaktifkan manual.
+--
+-- Intro TIDAK muncul jika:
+--   * auto execute aktif (script jalan saat game belum selesai dimuat)
+--   * hanya pindah game / teleport (Roblox belum benar-benar ditutup)
+--   * Intro=false di file
+--------------------------------------------------------------------
+local SETTINGS_DIR = "Levian Hub"
+local SETTINGS_FILE = SETTINGS_DIR .. "/Intro_LevianHub.txt"
+
+local function readSettings()
+	local cfg = {Intro = true, LastSession = "", exists = false}
+	if isfile and readfile then
+		local ok, exists = pcall(isfile, SETTINGS_FILE)
+		if ok and exists then
+			cfg.exists = true
+			local ok2, content = pcall(readfile, SETTINGS_FILE)
+			if ok2 and type(content) == "string" then
+				for line in content:gmatch("[^\r\n]+") do
+					local k, v = line:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
+					if k == "Intro" then
+						local lv = v:lower()
+						cfg.Intro = not (lv == "false" or lv == "off" or lv == "no" or lv == "0")
+					elseif k == "LastSession" then
+						cfg.LastSession = v
+					end
+				end
+			end
+		end
+	end
+	return cfg
+end
+
+local function writeSettings(cfg)
+	if not writefile then return end
+	pcall(function()
+		if makefolder and isfolder and not isfolder(SETTINGS_DIR) then
+			makefolder(SETTINGS_DIR)
+		end
+		writefile(SETTINGS_FILE, table.concat({
+			"-- Levian Hub intro settings",
+			"-- Intro=true  : intro tampil sekali setiap Roblox dibuka",
+			"-- Intro=false : intro dimatikan",
+			"-- (LastSession diisi otomatis oleh script, jangan diubah)",
+			"Intro=" .. (cfg.Intro and "true" or "false"),
+			"LastSession=" .. tostring(cfg.LastSession or ""),
+		}, "\n"))
+	end)
+end
+
+local function getSessionId()
+	local ok, id = pcall(function()
+		return game:GetService("RbxAnalyticsService"):GetSessionId()
+	end)
+	if ok and type(id) == "string" and id ~= "" then
+		return id
+	end
+	return nil
+end
 
 local function shouldPlayIntro()
 	local env = (getgenv and getgenv()) or _G
-	if env.LevianIntroPlayed then
-		return false -- sudah pernah diputar di sesi ini
+	local cfg = readSettings()
+	if not cfg.exists then
+		writeSettings(cfg) -- buat file default (Intro=true)
 	end
-	env.LevianIntroPlayed = true
 
-	if INTRO_ONCE_EVER and isfile and writefile then
-		local ok, seen = pcall(isfile, INTRO_FLAG_FILE)
-		if ok and seen then
-			return false -- sudah pernah diputar sebelumnya
+	local sid = getSessionId()
+	local function markSession()
+		env.LevianIntroPlayed = true
+		if sid then
+			cfg.LastSession = sid
+			writeSettings(cfg)
 		end
-		pcall(function()
-			if makefolder and isfolder and not isfolder("LevianHub") then
-				makefolder("LevianHub")
-			end
-			writefile(INTRO_FLAG_FILE, "1")
-		end)
 	end
+
+	-- 1. Auto execute: script jalan sebelum game selesai dimuat
+	local t = (time and time()) or 999
+	if not game:IsLoaded() or t < 5 then
+		markSession() -- sesi ini dianggap sudah lewat, tidak ada intro walau execute manual nanti
+		return false
+	end
+
+	-- 2. Dimatikan manual di file
+	if not cfg.Intro then
+		return false
+	end
+
+	-- 3. Masih sesi Roblox yang sama (pindah game / execute ulang)
+	if env.LevianIntroPlayed or (sid and cfg.LastSession == sid) then
+		return false
+	end
+
+	markSession()
 	return true
 end
 
 local file = games[game.PlaceId]
 if file then
-	-- Intro hanya di execute pertama. Jalan bersamaan dengan script game,
-	-- supaya logo bisa mendarat tepat di tombol bulat (kalau gagal, game tetap jalan)
+	-- Intro jalan bersamaan dengan script game, supaya logo bisa mendarat
+	-- tepat di tombol bulat (kalau gagal, game tetap jalan)
 	if shouldPlayIntro() then
 		task.spawn(function()
 			pcall(function()
