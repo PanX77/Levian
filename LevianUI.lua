@@ -122,7 +122,6 @@ local function parentGui(gui)
 	gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- objek yang tidak error kalau dipanggil method yang tidak ada
 local function safeObj(t)
 	return setmetatable(t, {
 		__index = function()
@@ -166,7 +165,7 @@ function Library.ApplyLogo(btn)
 		return false
 	end
 	if btn:FindFirstChild("LevianLogo") then
-		return true -- another caller finished first
+		return true 
 	end
 	local img = new("ImageLabel", {
 		Name = "LevianLogo",
@@ -334,7 +333,7 @@ function Library.CreateMain(...)
 		corner(b, 6)
 		return b
 	end
-	local minBtn = barBtn("-", -34) -- tombol close dihapus: di Android menutup seluruh UI termasuk logo
+	local minBtn = barBtn("-", -34)
 	makeDraggable(bar, win)
 
 	-- sidebar + isi
@@ -357,7 +356,7 @@ function Library.CreateMain(...)
 		Size = UDim2.new(1, -154, 1, -52),
 	}, win)
 
-	-- tombol melayang untuk buka/tutup (cocok untuk HP)
+	-- tombol melayang untuk buka/tutup
 	local tgui = new("ScreenGui", { Name = "LevianUI Toggle", ResetOnSpawn = false, DisplayOrder = 999 })
 	parentGui(tgui)
 	local fab = new("TextButton", {
@@ -468,7 +467,7 @@ function Library.CreateMain(...)
 				return r
 			end
 
-			---------------------------------------------------- toggle (saklar)
+			---------------------------------------------------- toggle
 			function Section.CreateToggle(...)
 				local sp, cb = args(Section, ...)
 				sp = norm(sp)
@@ -848,7 +847,7 @@ function Library.CreateMain(...)
 				return obj
 			end
 
-			---------------------------------------------------- box (input)
+			---------------------------------------------------- box
 			function Section.CreateBox(...)
 				local sp, cb = args(Section, ...)
 				sp = norm(sp)
@@ -924,7 +923,6 @@ function Library.CreateMain(...)
 			return safeObj(Section)
 		end
 
-		-- elemen yang dibuat langsung di Page masuk ke section default
 		local default
 		local function ds()
 			default = default or Page.CreateSection("")
