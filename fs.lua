@@ -3,6 +3,8 @@
 ]]
 
 local HttpService = game:GetService("HttpService")
+local LOBBY_ID, MATCH_ID = 99521272836282, 79787558257549
+local IN_LOBBY = game.PlaceId == LOBBY_ID -- the Lobby tab only exists in the lobby, not in a match
 local RS = game:GetService("ReplicatedStorage")
 
 ---------------------------------------------------------------- saved settings
@@ -44,6 +46,13 @@ local cfg = {
 	flyHeight = 25,
 	flySpeed = 30,
 	oxygenPath = "",
+	dodgePatterns = "HitCircle,Telegraph,Indicator,AOE,DangerZone", -- part names that count as a hit circle (guess, edit in the menu)
+	dodgeMode = "Tween",
+	dodgeSpeed = 60,
+	dodgeMargin = 6,
+	bossName = "Boss",
+	raidBoss = "Colosseum",
+	raidPatterns = {}, -- hit circle names per raid boss (empty = use the general names)
 }
 pcall(function()
 	if isfile then
@@ -57,6 +66,9 @@ end)
 
 if type(cfg.challenges) ~= "table" then
 	cfg.challenges = {}
+end
+if type(cfg.raidPatterns) ~= "table" then
+	cfg.raidPatterns = {}
 end
 
 local function save()
@@ -911,6 +923,7 @@ end
 local RunService = game:GetService("RunService")
 local bubbleAuto, bubbleToken = false, nil
 local bubbleBusy = false -- true while the bubble loop is moving the character
+local dodgeBusy = false -- true while Auto Dodge is stepping out of a hit circle (it has the highest priority)
 local bubbleCache, bubbleCacheAt, bubbleVisited = {}, 0, {}
 
 local function objPos(o)
@@ -961,6 +974,8 @@ local function bubbleLoop(token)
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not hrp or not hum or hum.Health <= 0 then
 			task.wait(1)
+		elseif dodgeBusy then
+			task.wait(0.1)
 		else
 			local oxy = readOxygen()
 			local thr = tonumber(cfg.bubbleBelow) or 80
@@ -977,7 +992,7 @@ local function bubbleLoop(token)
 			else
 				local started = os.clock()
 				bubbleBusy = true
-				while bubbleAuto and bubbleToken == token and os.clock() - started < 20 do
+				while bubbleAuto and bubbleToken == token and not dodgeBusy and os.clock() - started < 20 do
 					local inst = target.inst
 					if not inst.Parent or not hrp.Parent or hum.Health <= 0 then
 						break
@@ -996,7 +1011,9 @@ local function bubbleLoop(token)
 						task.wait(0.25)
 					end
 				end
-				bubbleVisited[target.inst] = os.clock()
+				if not dodgeBusy then
+					bubbleVisited[target.inst] = os.clock()
+				end
 				bubbleBusy = false
 			end
 			end
@@ -1068,7 +1085,7 @@ local function riftLoop(token)
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not hrp or not hum or hum.Health <= 0 then
 			task.wait(1)
-		elseif bubbleBusy then
+		elseif bubbleBusy or dodgeBusy then
 			task.wait(0.3) -- oxygen first
 		else
 			local target = riftCandidates(hrp, char)[1]
@@ -1077,7 +1094,7 @@ local function riftLoop(token)
 			else
 				local started = os.clock()
 				riftBusy = true
-				while riftAuto and riftToken == token and not bubbleBusy and os.clock() - started < 25 do
+				while riftAuto and riftToken == token and not bubbleBusy and not dodgeBusy and os.clock() - started < 25 do
 					local inst = target.inst
 					if not inst.Parent or not hrp.Parent or hum.Health <= 0 then
 						break
@@ -1100,7 +1117,9 @@ local function riftLoop(token)
 						task.wait(0.25)
 					end
 				end
-				riftVisited[target.inst] = os.clock()
+				if not dodgeBusy then
+					riftVisited[target.inst] = os.clock()
+				end
 				riftBusy = false
 			end
 		end
@@ -1129,7 +1148,7 @@ local function walkLoop(token)
 		if not hrp or not hum or hum.Health <= 0 then
 			center = nil
 			task.wait(1)
-		elseif bubbleBusy or riftBusy or flyBusy then
+		elseif bubbleBusy or riftBusy or flyBusy or dodgeBusy then
 			center = nil -- take a new centre after the bubble/rift/fly
 			task.wait(0.3)
 		else
@@ -1140,7 +1159,7 @@ local function walkLoop(token)
 			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
 			hum:MoveTo(target)
 			local t0 = os.clock()
-			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and not flyBusy and os.clock() - t0 < 6 do
+			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and not flyBusy and not dodgeBusy and os.clock() - t0 < 6 do
 				local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
 				if math.sqrt(dx * dx + dz * dz) < 3 then
 					break
@@ -1167,7 +1186,7 @@ local function flyLoop(token)
 			center, ground, cur = nil, nil, nil
 			flyBusy = false
 			task.wait(1)
-		elseif bubbleBusy or riftBusy then
+		elseif bubbleBusy or riftBusy or dodgeBusy then
 			flyBusy = false
 			cur = nil -- take over from the real position after the trip
 			hum.PlatformStand = false
@@ -1202,6 +1221,253 @@ local function flyLoop(token)
 	if hum then
 		hum.PlatformStand = false
 	end
+end
+
+---------------------------------------------------------------- auto dodge (hit circles)
+-- Hit circles are found by NAME: every Part/Model in workspace whose name contains one of the words in
+-- "Hit circle names" (comma separated) is treated as a circle on the ground. The circle radius is taken from the
+-- part size (half of its second-largest side, so flat discs and balls both work). If you stand inside one,
+-- you are moved straight out of it (Safe = Humanoid:MoveTo, Tween = fast CFrame steps at "Dodge speed").
+-- The names are a guess: stand next to a circle and press "Show nearby flat parts" to see the real names.
+-- Campaign: Auto Dodge (always) / Boss Dodge (only while a boss is alive). Raid: names per raid boss. Dungeon: Auto Dodge.
+local Players = game:GetService("Players")
+local dodgeOn = { campaign = false, campaignBoss = false, raid = false, dungeon = false }
+local dodgeToken = nil
+local dodgeSet, dodgePats, dodgeKey = {}, {}, nil
+
+local function splitNames(text)
+	local out = {}
+	for part in tostring(text or ""):gmatch("[^,;|]+") do
+		local n = norm(part)
+		if n ~= "" then
+			out[#out + 1] = n
+		end
+	end
+	return out
+end
+
+local bossCache, bossAt = false, 0
+local function bossExists()
+	if os.clock() - bossAt > 2 then
+		bossAt = os.clock()
+		bossCache = false
+		local pat = norm(cfg.bossName)
+		if pat == "" then
+			pat = "boss"
+		end
+		for _, h in ipairs(workspace:GetDescendants()) do
+			if h:IsA("Humanoid") and h.Health > 0 then
+				local m = h.Parent
+				if m and not Players:GetPlayerFromCharacter(m) then
+					if norm(m.Name):find(pat, 1, true) or norm(h.DisplayName):find(pat, 1, true) then
+						bossCache = true
+						break
+					end
+				end
+			end
+		end
+	end
+	return bossCache
+end
+
+-- hit circle names that are active right now (nil = nothing to dodge at the moment)
+local function activePatterns()
+	local set, any = {}, false
+	local function add(list)
+		for _, p in ipairs(list) do
+			set[p] = true
+			any = true
+		end
+	end
+	local generic = splitNames(cfg.dodgePatterns)
+	if dodgeOn.campaign or dodgeOn.dungeon then
+		add(generic)
+	end
+	if dodgeOn.campaignBoss and bossExists() then
+		add(generic)
+	end
+	if dodgeOn.raid then
+		add(generic)
+		add(splitNames((cfg.raidPatterns or {})[cfg.raidBoss]))
+	end
+	if not any then
+		return nil
+	end
+	local out = {}
+	for p in pairs(set) do
+		out[#out + 1] = p
+	end
+	table.sort(out)
+	return out
+end
+
+local function isCircle(d)
+	if not (d:IsA("BasePart") or d:IsA("Model")) or d:IsA("Terrain") then
+		return false
+	end
+	local n = norm(d.Name)
+	local hit = false
+	for _, p in ipairs(dodgePats) do
+		if n:find(p, 1, true) then
+			hit = true
+			break
+		end
+	end
+	if not hit then
+		return false
+	end
+	local m = d:IsA("Model") and d or d:FindFirstAncestorOfClass("Model")
+	return not (m and Players:GetPlayerFromCharacter(m))
+end
+
+local function circleOf(d)
+	local cf, size
+	if d:IsA("Model") then
+		cf, size = d:GetBoundingBox()
+	else
+		cf, size = d.CFrame, d.Size
+	end
+	local t = { size.X, size.Y, size.Z }
+	table.sort(t)
+	return cf.Position, t[2] / 2
+end
+
+local dodgeConns = {}
+local function startIndex()
+	dodgeConns[#dodgeConns + 1] = workspace.DescendantAdded:Connect(function(d)
+		if dodgeKey and isCircle(d) then
+			dodgeSet[d] = true
+		end
+	end)
+	dodgeConns[#dodgeConns + 1] = workspace.DescendantRemoving:Connect(function(d)
+		dodgeSet[d] = nil
+	end)
+end
+local function stopIndex()
+	for _, c in ipairs(dodgeConns) do
+		c:Disconnect()
+	end
+	dodgeConns, dodgeSet, dodgeKey = {}, {}, nil
+end
+local function refreshIndex(pats)
+	local key = table.concat(pats, ",")
+	if key == dodgeKey then
+		return
+	end
+	dodgeKey, dodgePats, dodgeSet = key, pats, {}
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if isCircle(d) then
+			dodgeSet[d] = true
+		end
+	end
+end
+
+local function dodgeLoop(token)
+	startIndex()
+	local lastDanger = 0
+	while dodgeToken == token do
+		local pats = activePatterns()
+		local char = Players.LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not pats or not hrp or not hum or hum.Health <= 0 then
+			dodgeBusy = false
+			task.wait(0.25)
+		else
+			refreshIndex(pats)
+			local worst, wpos, wr, wpen = nil, nil, nil, 0
+			for d in pairs(dodgeSet) do
+				if d.Parent and not d:IsDescendantOf(char) and (not d:IsA("BasePart") or d.Transparency < 1) then
+					local pos, r = circleOf(d)
+					if r >= 2 and r <= 200 and math.abs(hrp.Position.Y - pos.Y) < 80 then
+						local dx, dz = hrp.Position.X - pos.X, hrp.Position.Z - pos.Z
+						local pen = r + 1 - math.sqrt(dx * dx + dz * dz)
+						if pen > wpen then
+							worst, wpos, wr, wpen = d, pos, r, pen
+						end
+					end
+				end
+			end
+			local dt = RunService.Heartbeat:Wait()
+			if worst then
+				dodgeBusy, lastDanger = true, os.clock()
+				local dx, dz = hrp.Position.X - wpos.X, hrp.Position.Z - wpos.Z
+				local len = math.sqrt(dx * dx + dz * dz)
+				if len < 0.1 then
+					local a = math.random() * math.pi * 2
+					dx, dz, len = math.cos(a), math.sin(a), 1
+				end
+				local margin = math.clamp(tonumber(cfg.dodgeMargin) or 6, 1, 40)
+				local tx, tz = wpos.X + dx / len * (wr + margin), wpos.Z + dz / len * (wr + margin)
+				if cfg.dodgeMode == "Safe" then
+					hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
+				else
+					local to = Vector3.new(tx, hrp.Position.Y, tz) - hrp.Position
+					local step = math.min(math.max(tonumber(cfg.dodgeSpeed) or 60, 5) * dt, to.Magnitude)
+					if to.Magnitude > 0.01 then
+						hrp.CFrame = hrp.CFrame + to.Unit * step
+					end
+					hrp.AssemblyLinearVelocity = Vector3.zero
+				end
+			elseif dodgeBusy and os.clock() - lastDanger > 0.4 then
+				dodgeBusy = false
+			end
+		end
+	end
+	dodgeBusy = false
+	stopIndex()
+end
+
+local function setDodge(key, v)
+	dodgeOn[key] = v and true or false
+	local anyOn = false
+	for _, x in pairs(dodgeOn) do
+		anyOn = anyOn or x
+	end
+	if anyOn and not dodgeToken then
+		local token = {}
+		dodgeToken = token
+		task.spawn(dodgeLoop, token)
+	elseif not anyOn then
+		dodgeToken = nil
+	end
+end
+
+-- flat parts near you with their names (to find the real hit circle name)
+local function nearbyFlat(radius)
+	local char = Players.LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return nil
+	end
+	local best = {}
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if d:IsA("BasePart") and not d:IsA("Terrain") and d.Transparency < 1 and not d:IsDescendantOf(char) then
+			local sz = d.Size
+			local thin = math.min(sz.X, sz.Y, sz.Z) <= 3 and math.max(sz.X, sz.Y, sz.Z) >= 4
+			local dist = (d.Position - hrp.Position).Magnitude
+			if thin and dist <= radius then
+				local m = d:FindFirstAncestorOfClass("Model")
+				if not (m and Players:GetPlayerFromCharacter(m)) then
+					if not best[d.Name] or dist < best[d.Name] then
+						best[d.Name] = dist
+					end
+				end
+			end
+		end
+	end
+	local list = {}
+	for n, dist in pairs(best) do
+		list[#list + 1] = { n = n, d = dist }
+	end
+	table.sort(list, function(a, b)
+		return a.d < b.d
+	end)
+	local out = {}
+	for i = 1, math.min(#list, 12) do
+		out[i] = list[i].n
+	end
+	return out
 end
 
 ---------------------------------------------------------------- after match (replay / lobby)
@@ -1500,7 +1766,7 @@ end
 
 -- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
 local reg, tog = {}, {}
-local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false, autoFarm = false }
+local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false, autoFarm = false, autoDodge = false, bossDodge = false, raidDodge = false, dungeonDodge = false }
 local SKIP = { pressMethod = true }
 local function snapshot()
 	local copy = {}
@@ -1564,6 +1830,8 @@ SAb.CreateButton({ Title = "Copy Link" }, function()
 	UI.CreateNoti({ Title = "Levian Hub", Desc = ok and "Link copied" or LINK, ShowTime = 4 })
 end)
 
+-- Lobby tab: only in the lobby (99521272836282), not inside a match (79787558257549)
+if IN_LOBBY then
 local Page = Main.CreatePage({ Page_Name = "Lobby", Page_Title = "Lobby" })
 
 local S1 = Page.CreateSection("CAMPAIGN")
@@ -1675,7 +1943,9 @@ tog.autoJoin = S2.CreateToggle({ Title = "Auto Join", Desc = "Retries every 20s;
 	end
 end)
 
-local PageF = Main.CreatePage({ Page_Name = "Farming", Page_Title = "Farming" })
+end
+
+local PageF = Main.CreatePage({ Page_Name = "Farm Setting", Page_Title = "Farm Setting" })
 
 local SFl = PageF.CreateSection("AUTO FARM")
 tog.autoFarm = SFl.CreateToggle({ Title = "Auto Farm", Desc = "Flies in a circle around the map", Default = false }, function(v)
@@ -1767,7 +2037,26 @@ end)
 SF.CreateLabel({ Title = "Weapons and cards are matched by their exact names." })
 SF.CreateLabel({ Title = "Auto Banish: if no banish is left, the card may be picked instead." })
 
-local SB = PageF.CreateSection("AUTO BUBBLE")
+local SW = PageF.CreateSection("WALK AROUND")
+tog.walk = SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
+	walkAuto = v and true or false
+	on.walk = walkAuto
+	UI.CreateNoti({ Title = "Walk Around", Desc = walkAuto and "ON" or "OFF", ShowTime = 2 })
+	if walkAuto then
+		local token = {}
+		walkToken = token
+		task.spawn(walkLoop, token)
+	end
+end)
+reg.walkRadius = SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
+	cfg.walkRadius = v
+	save()
+end)
+SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
+
+local PageC = Main.CreatePage({ Page_Name = "Campaign", Page_Title = "Campaign" })
+
+local SB = PageC.CreateSection("AUTO BUBBLE")
 tog.autoBubble = SB.CreateToggle({ Title = "Auto Bubble", Desc = "Moves to the nearest bubble", Default = false }, function(v)
 	bubbleAuto = v and true or false
 	on.autoBubble = bubbleAuto
@@ -1807,7 +2096,7 @@ SB.CreateButton({ Title = "Show oxygen reading" }, function()
 end)
 SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
 
-local SR = PageF.CreateSection("AUTO RIFT")
+local SR = PageC.CreateSection("AUTO RIFT")
 tog.autoRift = SR.CreateToggle({ Title = "Auto Rift", Desc = "Moves to the nearest rift", Default = false }, function(v)
 	riftAuto = v and true or false
 	on.autoRift = riftAuto
@@ -1838,24 +2127,7 @@ reg.riftTargets = SR.CreateDropdown({ Title = "Targets", List = { "Rift", "Cryst
 end)
 SR.CreateLabel({ Title = "Auto Bubble has priority when oxygen is low." })
 
-local SW = PageF.CreateSection("WALK AROUND")
-tog.walk = SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
-	walkAuto = v and true or false
-	on.walk = walkAuto
-	UI.CreateNoti({ Title = "Walk Around", Desc = walkAuto and "ON" or "OFF", ShowTime = 2 })
-	if walkAuto then
-		local token = {}
-		walkToken = token
-		task.spawn(walkLoop, token)
-	end
-end)
-reg.walkRadius = SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
-	cfg.walkRadius = v
-	save()
-end)
-SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
-
-local SA = PageF.CreateSection("AFTER MATCH")
+local SA = PageC.CreateSection("AFTER MATCH")
 reg.afterMatch = SA.CreateDropdown({ Title = "When the match ends", List = { "Nothing", "Replay", "Lobby" }, Default = cfg.afterMatch }, function(v)
 	cfg.afterMatch = v
 	save()
@@ -1878,6 +2150,86 @@ SA.CreateButton({ Title = "Show result buttons" }, function()
 end)
 SA.CreateLabel({ Title = "Skips Victory/Defeat screens, then presses Again or Lobby." })
 SA.CreateLabel({ Title = "Keep the menu hidden: it clicks the middle of the screen." })
+
+
+local SDg = PageC.CreateSection("DODGE")
+tog.autoDodge = SDg.CreateToggle({ Title = "Auto Dodge", Desc = "Steps out of hit circles", Default = false }, function(v)
+	on.autoDodge = v and true or false
+	setDodge("campaign", v)
+	UI.CreateNoti({ Title = "Auto Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+end)
+tog.bossDodge = SDg.CreateToggle({ Title = "Boss Dodge", Desc = "Dodges hit circles only while a boss is alive", Default = false }, function(v)
+	on.bossDodge = v and true or false
+	setDodge("campaignBoss", v)
+	UI.CreateNoti({ Title = "Boss Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+end)
+reg.bossName = SDg.CreateBox({ Title = "Boss name contains", Default = cfg.bossName }, function(v)
+	cfg.bossName = tostring(v or "")
+	save()
+end)
+reg.dodgePatterns = SDg.CreateBox({ Title = "Hit circle names", Default = cfg.dodgePatterns }, function(v)
+	cfg.dodgePatterns = tostring(v or "")
+	save()
+end)
+reg.dodgeMode = SDg.CreateDropdown({ Title = "Dodge mode", List = { "Safe", "Tween" }, Default = cfg.dodgeMode }, function(v)
+	cfg.dodgeMode = v
+	save()
+end)
+reg.dodgeSpeed = SDg.CreateSlider({ Title = "Dodge speed (Tween)", Min = 10, Max = 150, Default = tonumber(cfg.dodgeSpeed) or 60 }, function(v)
+	cfg.dodgeSpeed = v
+	save()
+end)
+reg.dodgeMargin = SDg.CreateSlider({ Title = "Safe distance outside circle", Min = 1, Max = 30, Default = tonumber(cfg.dodgeMargin) or 6 }, function(v)
+	cfg.dodgeMargin = v
+	save()
+end)
+SDg.CreateButton({ Title = "Show nearby flat parts" }, function()
+	local names = nearbyFlat(80)
+	if not names then
+		noti("Dodge", "Character not found", 3)
+	elseif #names == 0 then
+		noti("Dodge", "No flat parts within 80 studs", 4)
+	else
+		noti("Dodge", table.concat(names, " | "), 8)
+	end
+end)
+SDg.CreateLabel({ Title = "Stand next to a hit circle, press the button, then put its name in Hit circle names." })
+SDg.CreateLabel({ Title = "Names are comma separated, e.g. Telegraph,AOE" })
+
+local PageR = Main.CreatePage({ Page_Name = "Raid", Page_Title = "Raid" })
+local SRd = PageR.CreateSection("RAID BOSS DODGE")
+tog.raidDodge = SRd.CreateToggle({ Title = "Auto Dodge Boss", Desc = "Dodges the hit circles of the selected raid boss", Default = false }, function(v)
+	on.raidDodge = v and true or false
+	setDodge("raid", v)
+	UI.CreateNoti({ Title = "Raid Dodge", Desc = v and ("ON - " .. tostring(cfg.raidBoss)) or "OFF", ShowTime = 2 })
+end)
+local RAID_BOSS = {}
+for _, r in ipairs(RAIDS) do
+	RAID_BOSS[#RAID_BOSS + 1] = r[1]
+end
+local raidPatBox
+reg.raidBoss = SRd.CreateDropdown({ Title = "Raid name", List = RAID_BOSS, Default = cfg.raidBoss }, function(v)
+	cfg.raidBoss = v
+	save()
+	if raidPatBox then
+		pcall(raidPatBox.SetValue, cfg.raidPatterns[v] or "")
+	end
+end)
+raidPatBox = SRd.CreateBox({ Title = "Hit circle names (this raid)", Default = cfg.raidPatterns[cfg.raidBoss] or "" }, function(v)
+	cfg.raidPatterns[cfg.raidBoss] = tostring(v or "")
+	save()
+end)
+SRd.CreateLabel({ Title = "Each raid boss has its own mechanics: pick the raid, then set its circle names." })
+SRd.CreateLabel({ Title = "Empty = uses the general names from Campaign > Dodge. Speed/mode are shared." })
+
+local PageD = Main.CreatePage({ Page_Name = "Dungeon", Page_Title = "Dungeon" })
+local SDd = PageD.CreateSection("DUNGEON DODGE")
+tog.dungeonDodge = SDd.CreateToggle({ Title = "Auto Dodge", Desc = "Steps out of hit circles in the dungeon", Default = false }, function(v)
+	on.dungeonDodge = v and true or false
+	setDodge("dungeon", v)
+	UI.CreateNoti({ Title = "Dungeon Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+end)
+SDd.CreateLabel({ Title = "Uses the general hit circle names and settings from Campaign > Dodge." })
 
 local PageS = Main.CreatePage({ Page_Name = "Settings", Page_Title = "Settings" })
 local SS = PageS.CreateSection("SETTINGS")
@@ -1958,13 +2310,14 @@ autoList = SC.CreateDropdown({
 end)
 SC.CreateLabel({ Title = "Save stores the whole menu, including the toggles that are on." })
 
--- open the Lobby tab first (About Us is the first tab in the list)
+-- open the first working tab (Lobby in the lobby, Campaign in a match)
+local firstTab = IN_LOBBY and "Lobby" or "Campaign"
 pcall(function()
 	for _, root in ipairs({ game:GetService("CoreGui"), (gethui and gethui()) or game:GetService("CoreGui") }) do
 		local g = root:FindFirstChild("Levian Hub GUI")
 		if g then
 			for _, d in ipairs(g:GetDescendants()) do
-				if d:IsA("TextButton") and d.Text == "Lobby" then
+				if d:IsA("TextButton") and d.Text == firstTab then
 					local ok = pcall(function()
 						for _, c in ipairs(getconnections(d.MouseButton1Click)) do
 							c:Fire()
@@ -1990,7 +2343,7 @@ if autoName ~= "" and store.configs[autoName] then
 	end)
 end
 
-UI.CreateNoti({ Title = "Final Swarm v22", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v23", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
 
 -- Auto Minimize: hide the window like the "-" button does (the X logo stays and reopens it)
 if cfg.autoMinimize then
