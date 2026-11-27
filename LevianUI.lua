@@ -292,7 +292,7 @@ function Library.CreateMain(...)
 
 	-- hapus UI lama kalau ada
 	pcall(function()
-		for _, n in ipairs({ Library.GuiName, "LevianUI Toggle", "Nousigi Hub GUI", "BananaUI Toggle" }) do -- nama lama ikut dibersihkan
+		for _, n in ipairs({ Library.GuiName, "LevianUI Toggle" }) do
 			local old = game:GetService("CoreGui"):FindFirstChild(n)
 			if old then
 				old:Destroy()
