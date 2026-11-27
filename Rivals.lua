@@ -1,13 +1,6 @@
 --[[
 	Rivals.lua - Levian Hub (versi visual / utilitas, tanpa fitur tempur)
-
-	CREDIT / NOTE:
-	Sebagian ide dan potongan logika (kamera, viewmodel, crosshair, lighting,
-	config manager) diadaptasi dari open source "zerohub.cc rivals.lua"
-	(https://zerohub.cc/rivals.lua). Hak cipta kode asli tetap milik
-	para pembuat ZeroHub. Fitur tempur (aimbot, silent aim, ragebot,
-	hitbox expander, triggerbot, ESP, dll) sengaja TIDAK disertakan.
-	UI: LevianUI.
+	
 ]]
 
 if game.GameId ~= 6035872082 then
