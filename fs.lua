@@ -23,6 +23,10 @@ local cfg = {
 	cardFallback = "Pick first card",
 	cardMaxRerolls = 3,
 	cardPrefer = "Weapons first",
+	cardUseRemote = true, -- pick cards by remote (learned from the first pick) instead of pressing the button
+	cardRemote = "", -- learned remote (full path)
+	cardRemoteMethod = "FireServer",
+	cardRemoteArgs = {}, -- learned argument template
 	cardBanish = false,
 	weaponsWanted = {},
 	cardsWanted = {},
@@ -31,11 +35,9 @@ local cfg = {
 	bubbleName = "OxygenBubble",
 	bubbleBelow = 80,
 	bubbleSpeed = 20,
-	walkRadius = 30,
 	riftMode = "Safe",
 	riftSpeed = 20,
 	riftStay = true,
-	riftTargets = { "Rift", "Crystal", "Circle" },
 	pressMethod = "",
 	afterMatch = "Nothing",
 	afterDelay = 3,
@@ -45,7 +47,6 @@ local cfg = {
 	flyDistance = 30,
 	flyHeight = 25,
 	flySpeed = 30,
-	oxygenPath = "",
 	dodgePatterns = "HitCircle,Telegraph,Indicator,AOE,DangerZone", -- part names that count as a hit circle (guess, edit in the menu)
 	dodgeMode = "Tween",
 	dodgeSpeed = 60,
@@ -70,6 +71,10 @@ end
 if type(cfg.raidPatterns) ~= "table" then
 	cfg.raidPatterns = {}
 end
+if type(cfg.cardRemoteArgs) ~= "table" then
+	cfg.cardRemoteArgs = {}
+end
+cfg.cardRemote = tostring(cfg.cardRemote or "")
 
 local function save()
 	pcall(function()
@@ -326,7 +331,7 @@ end
 --   PlayerGui.Frames.Upgrades.Holder.Selection1..N      (ImageButton, 3-5 offers; name in .ItemTitle)
 --   PlayerGui.Frames.Upgrades.RerollFrame.RerollButton  (re-roll the offers)
 --   PlayerGui.Frames.Upgrades.RerollFrame.BanishButton  (press it, then press the card to remove)
--- Picking = pressing the card button, so the game itself sends the choice.
+-- Picking never clicks the screen: by the learned remote (see CR below) or by the button's own signal.
 local WEAPONS = {
 	"Daggers", "Bow", "Sword", "Shotgun", "Revolver", "Frost Walker", "Paintball Gun", "Poison Flask",
 	"Ninja Star", "Spike Ball", "Flame Walker", "Lightning Staff", "Bananarang", "Sniper", "Axe", "Missile",
@@ -521,8 +526,9 @@ local METHODS = {
 		end,
 	},
 }
--- real-input style first; the method that worked last time is remembered between sessions
-local PREF = { click = 1, connections = 2, signal = 3, touch = 4 }
+-- button signals first (no screen click); real clicks/touches only as a last resort and never for cards;
+-- the method that worked last time is remembered between sessions
+local PREF = { connections = 1, signal = 2, click = 3, touch = 4 }
 table.sort(METHODS, function(a, b)
 	return PREF[a[1]] < PREF[b[1]]
 end)
@@ -534,20 +540,29 @@ for i, m in ipairs(METHODS) do
 end
 
 -- press once with the best known method, no verification
-local function pressRaw(btn)
-	local m = METHODS[bestMethod or 1]
-	local ok = pcall(m[2], btn)
-	return ok
+local function isClickMethod(i)
+	return METHODS[i][1] == "click" or METHODS[i][1] == "touch"
+end
+local function pressRaw(btn) -- never clicks the screen
+	for i, m in ipairs(METHODS) do
+		if not isClickMethod(i) then
+			local ok, res = pcall(m[2], btn)
+			if ok and res ~= false then
+				return true
+			end
+		end
+	end
+	return false
 end
 
 -- press and check (up to ~1s per method) that something changed; falls through to the next method otherwise
-local function pressVerified(btn, check)
+local function pressVerified(btn, check, noClick)
 	local order = {}
-	if bestMethod then
+	if bestMethod and not (noClick and isClickMethod(bestMethod)) then
 		order[1] = bestMethod
 	end
 	for i = 1, #METHODS do
-		if i ~= bestMethod then
+		if i ~= bestMethod and not (noClick and isClickMethod(i)) then
 			order[#order + 1] = i
 		end
 	end
@@ -570,7 +585,6 @@ local function pressVerified(btn, check)
 	return false
 end
 
--- manual players click anywhere to skip the card-reveal animation: click the (non-button) title area
 -- wait until every card stopped moving (the reveal animation is over); returns false if the offer vanished
 local function cardsLayout()
 	local cards = getCards()
@@ -602,30 +616,6 @@ local function waitSettled(maxWait)
 		task.wait(0.05)
 	end
 	return true
-end
-
-local function skipAnimation()
-	local up = cardUI()
-	local target = up and up:FindFirstChild("TitleFrame")
-	if not target then
-		return
-	end
-	local okS, vim = pcall(function()
-		return game:GetService("VirtualInputManager")
-	end)
-	if not okS or not vim then
-		return
-	end
-	for _ = 1, 2 do
-		local x, y = centerOf(target)
-		x, y = x + math.random(-15, 15), y + math.random(-4, 4)
-		pcall(function()
-			vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
-			task.wait(0.03)
-			vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
-		end)
-		task.wait(0.08)
-	end
 end
 
 local function frameButton(word)
@@ -674,6 +664,224 @@ local function offerSig()
 	return table.concat(names, "|")
 end
 
+---------------------------------------------------------------- card remote (pick without touching the screen)
+-- The remote that picks a card is not known in advance, so it is LEARNED once: while the first card is picked
+-- by the button signal, every FireServer/InvokeServer call is recorded (hookmetamethod, only for that moment).
+-- The call that contains the card (its name, its Selection number, its position or the button) is turned into a
+-- template. From then on the remote is fired directly with the new card filled in, and the result is checked
+-- (the offer must change); if it keeps failing, the template is forgotten and learned again.
+local CR = {}
+do
+	local NAME_FORMS = {
+		{ "exact", function(n) return n end },
+		{ "compact", function(n) return (n:gsub("%s", "")) end },
+		{ "lower", function(n) return n:lower() end },
+		{ "lowercompact", function(n) return (n:gsub("%s", ""):lower()) end },
+	}
+	local function nameForm(form, n)
+		for _, f in ipairs(NAME_FORMS) do
+			if f[1] == form then
+				return f[2](n)
+			end
+		end
+		return n
+	end
+
+	local canHook = (hookmetamethod and getnamecallmethod) and true or false
+	local capOn, capOrig, capHooked, capCalls = false, nil, false, {}
+	local function captureBegin()
+		capCalls, capOn = {}, true
+		if capHooked then
+			return
+		end
+		pcall(function()
+			capOrig = hookmetamethod(game, "__namecall", (newcclosure or function(f) return f end)(function(self, ...)
+				if capOn then
+					local m = getnamecallmethod()
+					if (m == "FireServer" or m == "InvokeServer") and typeof(self) == "Instance" then
+						local cn = self.ClassName
+						if cn == "RemoteEvent" or cn == "RemoteFunction" then
+							capCalls[#capCalls + 1] = { remote = self, method = m, args = table.pack(...) }
+						end
+					end
+				end
+				return capOrig(self, ...)
+			end))
+			capHooked = capOrig ~= nil
+		end)
+	end
+	local function captureEnd()
+		capOn = false
+		if capHooked then
+			capHooked = false
+			pcall(hookmetamethod, game, "__namecall", capOrig) -- put the original back (the wrapper stays harmless if this fails)
+		end
+		return capCalls
+	end
+
+	local remoteInst
+	local function resolve()
+		if remoteInst and remoteInst.Parent then
+			return remoteInst
+		end
+		remoteInst = nil
+		if cfg.cardRemote == "" then
+			return nil
+		end
+		local cur = game
+		for part in cfg.cardRemote:gmatch("[^%.]+") do
+			cur = cur and cur:FindFirstChild(part)
+		end
+		if cur and cur ~= game and (cur:IsA("RemoteEvent") or cur:IsA("RemoteFunction")) then
+			remoteInst = cur
+		end
+		return remoteInst
+	end
+	local function learned()
+		return #cfg.cardRemoteArgs > 0 and resolve() ~= nil
+	end
+	function CR.forget()
+		cfg.cardRemote, cfg.cardRemoteMethod, cfg.cardRemoteArgs, remoteInst = "", "FireServer", {}, nil
+		save()
+	end
+	function CR.describe()
+		if not learned() then
+			return nil
+		end
+		local kinds = {}
+		for _, a in ipairs(cfg.cardRemoteArgs) do
+			kinds[#kinds + 1] = a.k == "lit" and tostring(a.v) or ("<" .. a.k .. ">")
+		end
+		return cfg.cardRemote .. " : " .. cfg.cardRemoteMethod .. "(" .. table.concat(kinds, ", ") .. ")"
+	end
+
+	-- turn a recorded call into a template; only if it really contains the card that was pressed
+	local function tryLearn(calls, c, idx)
+		local selnum = tonumber(c.btn.Name:match("%d+"))
+		for _, call in ipairs(calls) do
+			local tpl, matched, usable = {}, false, true
+			for i = 1, call.args.n do
+				local a, entry = call.args[i], nil
+				if a == c.btn then
+					entry, matched = { k = "btn" }, true
+				elseif type(a) == "string" then
+					if a == c.btn.Name then
+						entry, matched = { k = "btnname" }, true
+					else
+						for _, f in ipairs(NAME_FORMS) do
+							if a == f[2](c.name) then
+								entry, matched = { k = "name", form = f[1] }, true
+								break
+							end
+						end
+						entry = entry or { k = "lit", v = a }
+					end
+				elseif type(a) == "number" then
+					if selnum and a == selnum then
+						entry, matched = { k = "selnum" }, true
+					elseif a == idx then
+						entry, matched = { k = "index" }, true
+					else
+						entry = { k = "lit", v = a }
+					end
+				elseif type(a) == "boolean" then
+					entry = { k = "lit", v = a }
+				else
+					usable = false -- an Instance/table we cannot rebuild
+					break
+				end
+				tpl[#tpl + 1] = entry
+			end
+			if usable and matched and #tpl > 0 then
+				cfg.cardRemote = call.remote:GetFullName()
+				cfg.cardRemoteMethod = call.method
+				cfg.cardRemoteArgs = tpl
+				remoteInst = call.remote
+				save()
+				noti("Auto Card", "Learned card remote: " .. call.remote.Name, 5)
+				return true
+			end
+		end
+		return false
+	end
+
+	local function fire(c, idx)
+		local rem = resolve()
+		if not rem then
+			return false
+		end
+		local selnum = tonumber(c.btn.Name:match("%d+"))
+		local args, n = {}, 0
+		for i, a in ipairs(cfg.cardRemoteArgs) do
+			local v
+			if a.k == "btn" then
+				v = c.btn
+			elseif a.k == "btnname" then
+				v = c.btn.Name
+			elseif a.k == "selnum" then
+				v = selnum
+			elseif a.k == "index" then
+				v = idx
+			elseif a.k == "name" then
+				v = nameForm(a.form, c.name)
+			else
+				v = a.v
+			end
+			if v == nil then
+				return false
+			end
+			args[i], n = v, i
+		end
+		local method = cfg.cardRemoteMethod
+		task.spawn(function()
+			pcall(function()
+				if method == "InvokeServer" then
+					rem:InvokeServer(table.unpack(args, 1, n))
+				else
+					rem:FireServer(table.unpack(args, 1, n))
+				end
+			end)
+		end)
+		return true
+	end
+
+	local fails, tries = 0, 0
+	-- banish = true: only the button signal (the remote of a normal pick would pick instead of banish)
+	function CR.pick(c, check, idx, banish)
+		if not banish and cfg.cardUseRemote and learned() then
+			if fire(c, idx) then
+				for _ = 1, 20 do
+					task.wait(0.05)
+					if check() then
+						fails = 0
+						return true, "remote"
+					end
+				end
+			end
+			fails += 1
+			if fails >= 3 then
+				CR.forget()
+				fails = 0
+				noti("Auto Card", "Learned remote did not work - forgotten, learning again", 4)
+			end
+		end
+		local learning = not banish and cfg.cardUseRemote and canHook and not learned() and tries < 5
+		if learning then
+			tries += 1
+			captureBegin()
+		end
+		local ok, how = pressVerified(c.btn, check, true) -- never clicks the screen
+		if learning then
+			local calls = captureEnd()
+			if ok and not tryLearn(calls, c, idx) and tries >= 5 then
+				noti("Auto Card", "Could not learn the card remote - using the button signal", 4)
+			end
+		end
+		return ok, how
+	end
+	CR.canHook = canHook
+end
+
 local cardAuto, cardToken = false, nil
 local lastSig, lastAt, rerolls, banishes, failedSig = "", 0, 0, 0, nil
 local function cardStep()
@@ -686,7 +894,6 @@ local function cardStep()
 		return -- this offer was already handled
 	end
 	lastSig, lastAt = sig, os.clock()
-	skipAnimation()
 	waitSettled(3)
 	local cards = getCards()
 	if not cards then
@@ -698,8 +905,14 @@ local function cardStep()
 		return offerSig() ~= sig
 	end
 	-- press a card and only report success if the offer really changed
-	local function choose(c, label)
-		local ok, how = pressVerified(c.btn, changed)
+	local function choose(c, label, banish)
+		local idx
+		for i, x in ipairs(cards) do
+			if x == c then
+				idx = i
+			end
+		end
+		local ok, how = CR.pick(c, changed, idx, banish)
 		if ok then
 			noti("Auto Card", label .. c.name .. " (" .. how .. ")", 3)
 			return true
@@ -725,7 +938,7 @@ local function cardStep()
 				if bb then
 					pressRaw(bb)
 					task.wait(0.5)
-					if choose(c, "Banished: ") then
+					if choose(c, "Banished: ", true) then
 						banishes += 1
 						return
 					end
@@ -742,7 +955,7 @@ local function cardStep()
 	if mode == "Reroll" and rerolls < (tonumber(cfg.cardMaxRerolls) or 0) then
 		local rb = frameButton("reroll")
 		if rb then
-			local ok, how = pressVerified(rb, changed)
+			local ok, how = pressVerified(rb, changed, true)
 			if ok then
 				rerolls += 1
 				noti("Auto Card", "Reroll " .. rerolls .. "/" .. tostring(cfg.cardMaxRerolls) .. " (" .. how .. ")", 2)
@@ -768,7 +981,7 @@ end
 -- Tween = moves the character toward the bubble at the speed set by "Tween speed"
 ---------------------------------------------------------------- oxygen reading
 -- Returns oxygen as a percentage (0-100) and a short description of where it came from.
--- Order: optional PlayerGui path from the menu -> attributes -> Value objects -> an "oxygen" bar in PlayerGui.
+-- Order: attributes -> Value objects -> an "oxygen" bar in PlayerGui.
 local function percentFromGui(o)
 	if o:IsA("TextLabel") or o:IsA("TextButton") then
 		local txt = cleanText(o.Text)
@@ -794,14 +1007,6 @@ local function percentFromGui(o)
 		end
 	end
 	return nil
-end
-
-local function resolvePath(path)
-	local cur = localPG()
-	for part in tostring(path):gmatch("[^%.]+") do
-		cur = cur and cur:FindFirstChild(part)
-	end
-	return cur
 end
 
 local function fromAttributes(inst)
@@ -885,15 +1090,7 @@ end
 local function readOxygen()
 	local lp = game:GetService("Players").LocalPlayer
 	local char = lp.Character
-	-- 1) path typed in the menu
-	if cfg.oxygenPath and cfg.oxygenPath ~= "" then
-		local o = resolvePath(cfg.oxygenPath)
-		local p = o and percentFromGui(o)
-		if p then
-			return p, "path: " .. cfg.oxygenPath
-		end
-	end
-	-- 2) attributes and Value objects
+	-- 1) attributes and Value objects
 	for _, inst in ipairs({ lp, char, char and char:FindFirstChildOfClass("Humanoid") }) do
 		local p = inst and fromAttributes(inst)
 		if p then
@@ -906,7 +1103,7 @@ local function readOxygen()
 			return p, "value in " .. root.Name
 		end
 	end
-	-- 3) an oxygen bar / label in the UI (cached)
+	-- 2) an oxygen bar / label in the UI (cached)
 	if not (oxyGui and oxyGui.Parent) and os.clock() - oxyGuiTry > 2 then
 		oxyGuiTry = os.clock()
 		oxyGui = findOxygenGui()
@@ -1031,6 +1228,7 @@ local riftAuto, riftToken = false, nil
 local riftBusy = false -- true while the rift loop is moving the character
 local flyBusy = false -- true while Auto Farm (fly) is moving the character
 local riftCache, riftCacheAt, riftVisited = {}, 0, {}
+local RIFT_TARGETS = { "Rift", "Crystal", "Circle" } -- every rift object type is targeted
 
 local function riftCandidates(hrp, char)
 	if os.clock() - riftCacheAt > 1 then
@@ -1040,7 +1238,7 @@ local function riftCandidates(hrp, char)
 		local root = map and map:FindFirstChild("RiftRuntime")
 		if root then
 			local want = {}
-			for _, n in ipairs(cfg.riftTargets or {}) do
+			for _, n in ipairs(RIFT_TARGETS) do
 				want[norm(n)] = true
 			end
 			for _, d in ipairs(root:GetDescendants()) do
@@ -1127,10 +1325,13 @@ local function riftLoop(token)
 	riftBusy = false
 end
 
----------------------------------------------------------------- walk around (in-match)
--- Walks to random points around where you were when it was switched on (Roblox walking, Humanoid:MoveTo).
--- It pauses while Auto Bubble, Auto Rift or Auto Farm is moving the character.
-local walkAuto, walkToken = false, nil
+---------------------------------------------------------------- auto farm modes: walking (in-match)
+-- Auto Farm has three modes (the "Mode" dropdown):
+--   Fly            = flies in a circle in the air (next section)
+--   Walk Around    = walks to random points around where it was switched on (Roblox walking, Humanoid:MoveTo)
+--   Walking Circle = walks around a circle on the ground (Humanoid:MoveTo)
+-- "Distance" is the radius of all three. The walking modes pause while Auto Dodge, Auto Bubble or Auto Rift moves you.
+local flyAuto, flyToken = false, nil
 local function groundAt(pos, char)
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = { char }
@@ -1141,25 +1342,25 @@ end
 
 local function walkLoop(token)
 	local center
-	while walkAuto and walkToken == token do
+	while flyAuto and flyToken == token do
 		local char = game:GetService("Players").LocalPlayer.Character
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not hrp or not hum or hum.Health <= 0 then
 			center = nil
 			task.wait(1)
-		elseif bubbleBusy or riftBusy or flyBusy or dodgeBusy then
-			center = nil -- take a new centre after the bubble/rift/fly
+		elseif bubbleBusy or riftBusy or dodgeBusy then
+			center = nil -- take a new centre after the bubble/rift/dodge
 			task.wait(0.3)
 		else
 			center = center or hrp.Position
-			local r = math.max(tonumber(cfg.walkRadius) or 30, 5)
+			local r = math.max(tonumber(cfg.flyDistance) or 30, 5)
 			local ang, dist = math.random() * math.pi * 2, 5 + math.random() * (r - 5)
 			local flat = center + Vector3.new(math.cos(ang) * dist, 0, math.sin(ang) * dist)
 			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
 			hum:MoveTo(target)
 			local t0 = os.clock()
-			while walkAuto and walkToken == token and not bubbleBusy and not riftBusy and not flyBusy and not dodgeBusy and os.clock() - t0 < 6 do
+			while flyAuto and flyToken == token and not bubbleBusy and not riftBusy and not dodgeBusy and os.clock() - t0 < 6 do
 				local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
 				if math.sqrt(dx * dx + dz * dz) < 3 then
 					break
@@ -1171,11 +1372,39 @@ local function walkLoop(token)
 	end
 end
 
+local function walkCircleLoop(token)
+	local center, ang, pointAt
+	while flyAuto and flyToken == token do
+		local char = game:GetService("Players").LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then
+			center = nil
+			task.wait(1)
+		elseif bubbleBusy or riftBusy or dodgeBusy then
+			task.wait(0.3)
+		else
+			if not center then
+				center, ang, pointAt = hrp.Position, 0, os.clock()
+			end
+			local r = math.max(tonumber(cfg.flyDistance) or 30, 5)
+			local flat = center + Vector3.new(math.cos(ang) * r, 0, math.sin(ang) * r)
+			local target = Vector3.new(flat.X, groundAt(flat, char) + 3, flat.Z)
+			hum:MoveTo(target)
+			local dx, dz = hrp.Position.X - target.X, hrp.Position.Z - target.Z
+			if math.sqrt(dx * dx + dz * dz) < 4 or os.clock() - pointAt > 3 then
+				ang += 0.4 -- next point along the circle
+				pointAt = os.clock()
+			end
+			task.wait(0.1)
+		end
+	end
+end
+
 ---------------------------------------------------------------- auto farm: fly in a circle (in-match)
 -- Flies around a circle. Centre = where you were when it was switched on,
 -- Distance = radius (studs), Height = height above the ground at the centre, Speed = studs per second.
 -- Auto Bubble and Auto Rift have priority (they take over, then the circle continues).
-local flyAuto, flyToken = false, nil
 local function flyLoop(token)
 	local center, ground, angle, cur
 	while flyAuto and flyToken == token do
@@ -1220,6 +1449,19 @@ local function flyLoop(token)
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if hum then
 		hum.PlatformStand = false
+	end
+end
+
+-- starts the loop of the selected Auto Farm mode (a new token stops the previous loop)
+local function startFarm()
+	local token = {}
+	flyToken = token
+	if cfg.flyMode == "Walk Around" then
+		task.spawn(walkLoop, token)
+	elseif cfg.flyMode == "Walking Circle" then
+		task.spawn(walkCircleLoop, token)
+	else
+		task.spawn(flyLoop, token)
 	end
 end
 
@@ -1431,6 +1673,37 @@ local function setDodge(key, v)
 	elseif not anyOn then
 		dodgeToken = nil
 	end
+end
+
+-- enemies (non-player Humanoids) near you: shows the real boss name
+local function nearbyEnemies(radius)
+	local char = Players.LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return nil
+	end
+	local best = {}
+	for _, h in ipairs(workspace:GetDescendants()) do
+		if h:IsA("Humanoid") and h.Health > 0 and h.Parent and not Players:GetPlayerFromCharacter(h.Parent) then
+			local root = h.Parent:FindFirstChild("HumanoidRootPart") or h.Parent:FindFirstChildWhichIsA("BasePart")
+			local dist = root and (root.Position - hrp.Position).Magnitude or math.huge
+			if dist <= radius and (not best[h.Parent.Name] or dist < best[h.Parent.Name]) then
+				best[h.Parent.Name] = dist
+			end
+		end
+	end
+	local list = {}
+	for n, d in pairs(best) do
+		list[#list + 1] = { n = n, d = d }
+	end
+	table.sort(list, function(a, b)
+		return a.d < b.d
+	end)
+	local out = {}
+	for i = 1, math.min(#list, 8) do
+		out[i] = list[i].n
+	end
+	return out
 end
 
 -- flat parts near you with their names (to find the real hit circle name)
@@ -1766,8 +2039,8 @@ end
 
 -- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
 local reg, tog = {}, {}
-local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, walk = false, autoFarm = false, autoDodge = false, bossDodge = false, raidDodge = false, dungeonDodge = false }
-local SKIP = { pressMethod = true }
+local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, autoFarm = false, autoDodge = false, bossDodge = false, raidDodge = false, dungeonDodge = false }
+local SKIP = { pressMethod = true, cardRemote = true, cardRemoteMethod = true, cardRemoteArgs = true }
 local function snapshot()
 	local copy = {}
 	for k, v in pairs(cfg) do
@@ -1948,21 +2221,22 @@ end
 local PageF = Main.CreatePage({ Page_Name = "Farm Setting", Page_Title = "Farm Setting" })
 
 local SFl = PageF.CreateSection("AUTO FARM")
-tog.autoFarm = SFl.CreateToggle({ Title = "Auto Farm", Desc = "Flies in a circle around the map", Default = false }, function(v)
+tog.autoFarm = SFl.CreateToggle({ Title = "Auto Farm", Desc = "Fly / walk around where you switched it on", Default = false }, function(v)
 	flyAuto = v and true or false
 	on.autoFarm = flyAuto
 	UI.CreateNoti({ Title = "Auto Farm", Desc = flyAuto and ("ON - " .. tostring(cfg.flyMode)) or "OFF", ShowTime = 2 })
 	if flyAuto then
-		local token = {}
-		flyToken = token
-		task.spawn(flyLoop, token)
+		startFarm()
 	end
 end)
-reg.flyMode = SFl.CreateDropdown({ Title = "Mode", List = { "Fly" }, Default = cfg.flyMode }, function(v)
+reg.flyMode = SFl.CreateDropdown({ Title = "Mode", List = { "Fly", "Walk Around", "Walking Circle" }, Default = cfg.flyMode }, function(v)
 	cfg.flyMode = v
 	save()
+	if flyAuto then
+		startFarm() -- switch the running mode
+	end
 end)
-reg.flyDistance = SFl.CreateSlider({ Title = "Distance", Min = 1, Max = 100, Default = tonumber(cfg.flyDistance) or 30 }, function(v)
+reg.flyDistance = SFl.CreateSlider({ Title = "Distance (radius)", Min = 1, Max = 100, Default = tonumber(cfg.flyDistance) or 30 }, function(v)
 	cfg.flyDistance = v
 	save()
 end)
@@ -1974,8 +2248,9 @@ reg.flySpeed = SFl.CreateSlider({ Title = "Speed", Min = 1, Max = 100, Default =
 	cfg.flySpeed = v
 	save()
 end)
-SFl.CreateLabel({ Title = "Circles around where you switched it on." })
-SFl.CreateLabel({ Title = "Auto Bubble and Auto Rift take over when needed." })
+SFl.CreateLabel({ Title = "Fly: circle in the air. Walk Around: random points. Walking Circle: circle on the ground." })
+SFl.CreateLabel({ Title = "Centre = where you switched it on. Height and Speed are for Fly only." })
+SFl.CreateLabel({ Title = "Auto Dodge, Auto Bubble and Auto Rift take over when needed." })
 
 
 local SF = PageF.CreateSection("AUTO CARD")
@@ -2022,6 +2297,22 @@ reg.banishList = SF.CreateDropdown({ Title = "Banish list", List = BANISH_ALL, M
 	cfg.banishList = toArray(BANISH_ALL, sel)
 	save()
 end)
+reg.cardUseRemote = SF.CreateToggle({ Title = "Use remote (no click)", Desc = "Learns the card remote from the first pick, then fires it directly", Default = cfg.cardUseRemote }, function(v)
+	cfg.cardUseRemote = v and true or false
+	save()
+end)
+SF.CreateButton({ Title = "Show learned remote" }, function()
+	local d = CR.describe()
+	if d then
+		noti("Card remote", d, 8)
+	else
+		noti("Card remote", CR.canHook and "Not learned yet - it is learned from the first card pick" or "Not learned - this executor has no hookmetamethod, the button signal is used", 6)
+	end
+end)
+SF.CreateButton({ Title = "Forget learned remote" }, function()
+	CR.forget()
+	noti("Card remote", "Forgotten - it will be learned again", 3)
+end)
 SF.CreateButton({ Title = "Show cards on screen" }, function()
 	local cards = getCards()
 	if not cards then
@@ -2034,25 +2325,93 @@ SF.CreateButton({ Title = "Show cards on screen" }, function()
 	end
 	noti("Cards (" .. #cards .. ")", table.concat(names, " | "), 6)
 end)
+SF.CreateLabel({ Title = "Cards are never picked by clicking the screen." })
 SF.CreateLabel({ Title = "Weapons and cards are matched by their exact names." })
 SF.CreateLabel({ Title = "Auto Banish: if no banish is left, the card may be picked instead." })
 
-local SW = PageF.CreateSection("WALK AROUND")
-tog.walk = SW.CreateToggle({ Title = "Walk Around", Desc = "Walks randomly around where you are", Default = false }, function(v)
-	walkAuto = v and true or false
-	on.walk = walkAuto
-	UI.CreateNoti({ Title = "Walk Around", Desc = walkAuto and "ON" or "OFF", ShowTime = 2 })
-	if walkAuto then
-		local token = {}
-		walkToken = token
-		task.spawn(walkLoop, token)
+-- DODGE (all dodge settings live here: Campaign, Boss, Raid boss, Dungeon)
+do
+	local SDg = PageF.CreateSection("DODGE")
+	tog.autoDodge = SDg.CreateToggle({ Title = "Auto Dodge", Desc = "Steps out of hit circles", Default = false }, function(v)
+		on.autoDodge = v and true or false
+		setDodge("campaign", v)
+		UI.CreateNoti({ Title = "Auto Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+	end)
+	tog.bossDodge = SDg.CreateToggle({ Title = "Boss Dodge", Desc = "Dodges hit circles only while a boss is alive", Default = false }, function(v)
+		on.bossDodge = v and true or false
+		setDodge("campaignBoss", v)
+		UI.CreateNoti({ Title = "Boss Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+	end)
+	tog.raidDodge = SDg.CreateToggle({ Title = "Raid Boss Dodge", Desc = "Dodges the hit circles of the raid selected below", Default = false }, function(v)
+		on.raidDodge = v and true or false
+		setDodge("raid", v)
+		UI.CreateNoti({ Title = "Raid Boss Dodge", Desc = v and ("ON - " .. tostring(cfg.raidBoss)) or "OFF", ShowTime = 2 })
+	end)
+	tog.dungeonDodge = SDg.CreateToggle({ Title = "Dungeon Dodge", Desc = "Steps out of hit circles in the dungeon", Default = false }, function(v)
+		on.dungeonDodge = v and true or false
+		setDodge("dungeon", v)
+		UI.CreateNoti({ Title = "Dungeon Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
+	end)
+	local RAID_BOSS = {}
+	for _, r in ipairs(RAIDS) do
+		RAID_BOSS[#RAID_BOSS + 1] = r[1]
 	end
-end)
-reg.walkRadius = SW.CreateSlider({ Title = "Walk radius", Min = 5, Max = 100, Default = tonumber(cfg.walkRadius) or 30 }, function(v)
-	cfg.walkRadius = v
-	save()
-end)
-SW.CreateLabel({ Title = "Pauses while Auto Bubble or Auto Rift is moving." })
+	local raidPatBox
+	reg.raidBoss = SDg.CreateDropdown({ Title = "Raid name", List = RAID_BOSS, Default = cfg.raidBoss }, function(v)
+		cfg.raidBoss = v
+		save()
+		if raidPatBox then
+			pcall(raidPatBox.SetValue, cfg.raidPatterns[v] or "")
+		end
+	end)
+	raidPatBox = SDg.CreateBox({ Title = "Raid hit circle names", Default = cfg.raidPatterns[cfg.raidBoss] or "" }, function(v)
+		cfg.raidPatterns[cfg.raidBoss] = tostring(v or "")
+		save()
+	end)
+	reg.bossName = SDg.CreateBox({ Title = "Boss name contains", Default = cfg.bossName }, function(v)
+		cfg.bossName = tostring(v or "")
+		save()
+	end)
+	reg.dodgePatterns = SDg.CreateBox({ Title = "Hit circle names", Default = cfg.dodgePatterns }, function(v)
+		cfg.dodgePatterns = tostring(v or "")
+		save()
+	end)
+	reg.dodgeMode = SDg.CreateDropdown({ Title = "Dodge mode", List = { "Safe", "Tween" }, Default = cfg.dodgeMode }, function(v)
+		cfg.dodgeMode = v
+		save()
+	end)
+	reg.dodgeSpeed = SDg.CreateSlider({ Title = "Dodge speed (Tween)", Min = 10, Max = 150, Default = tonumber(cfg.dodgeSpeed) or 60 }, function(v)
+		cfg.dodgeSpeed = v
+		save()
+	end)
+	reg.dodgeMargin = SDg.CreateSlider({ Title = "Safe distance outside circle", Min = 1, Max = 30, Default = tonumber(cfg.dodgeMargin) or 6 }, function(v)
+		cfg.dodgeMargin = v
+		save()
+	end)
+	SDg.CreateButton({ Title = "Show nearby flat parts" }, function()
+		local names = nearbyFlat(80)
+		if not names then
+			noti("Dodge", "Character not found", 3)
+		elseif #names == 0 then
+			noti("Dodge", "No flat parts within 80 studs", 4)
+		else
+			noti("Dodge", table.concat(names, " | "), 8)
+		end
+	end)
+	SDg.CreateButton({ Title = "Show nearby enemies" }, function()
+		local names = nearbyEnemies(300)
+		if not names then
+			noti("Dodge", "Character not found", 3)
+		elseif #names == 0 then
+			noti("Dodge", "No enemies within 300 studs", 4)
+		else
+			noti("Dodge", table.concat(names, " | ") .. (bossExists() and "  (boss found)" or "  (no boss matched)"), 8)
+		end
+	end)
+	SDg.CreateLabel({ Title = "Stand next to a hit circle, press 'Show nearby flat parts', then put its name in Hit circle names." })
+	SDg.CreateLabel({ Title = "Raid: pick the raid, then set that boss's circle names (empty = the general names)." })
+	SDg.CreateLabel({ Title = "Names are comma separated, e.g. Telegraph,AOE. Dodge mode/speed are shared." })
+end
 
 local PageC = Main.CreatePage({ Page_Name = "Campaign", Page_Title = "Campaign" })
 
@@ -2082,18 +2441,6 @@ reg.bubbleSpeed = SB.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, D
 	cfg.bubbleSpeed = v
 	save()
 end)
-reg.oxygenPath = SB.CreateBox({ Title = "Oxygen UI path (optional)", Default = cfg.oxygenPath }, function(v)
-	cfg.oxygenPath = type(v) == "string" and v or ""
-	save()
-end)
-SB.CreateButton({ Title = "Show oxygen reading" }, function()
-	local p, src = readOxygen()
-	if p then
-		noti("Oxygen", string.format("%d%% (%s)", math.floor(p + 0.5), src), 5)
-	else
-		noti("Oxygen", "Not found. Go underwater and try again, or set the UI path.", 5)
-	end
-end)
 SB.CreateLabel({ Title = "Goes to a bubble when oxygen is below the slider value." })
 
 local SR = PageC.CreateSection("AUTO RIFT")
@@ -2119,10 +2466,6 @@ reg.riftSpeed = SR.CreateSlider({ Title = "Tween speed", Min = 0, Max = 100, Def
 end)
 reg.riftStay = SR.CreateToggle({ Title = "Stay at rift", Desc = "Stays next to the rift while it exists", Default = cfg.riftStay }, function(v)
 	cfg.riftStay = v and true or false
-	save()
-end)
-reg.riftTargets = SR.CreateDropdown({ Title = "Targets", List = { "Rift", "Crystal", "Circle" }, Multi = true, Default = cfg.riftTargets }, function(sel)
-	cfg.riftTargets = toArray({ "Rift", "Crystal", "Circle" }, sel)
 	save()
 end)
 SR.CreateLabel({ Title = "Auto Bubble has priority when oxygen is low." })
@@ -2151,85 +2494,6 @@ end)
 SA.CreateLabel({ Title = "Skips Victory/Defeat screens, then presses Again or Lobby." })
 SA.CreateLabel({ Title = "Keep the menu hidden: it clicks the middle of the screen." })
 
-
-local SDg = PageC.CreateSection("DODGE")
-tog.autoDodge = SDg.CreateToggle({ Title = "Auto Dodge", Desc = "Steps out of hit circles", Default = false }, function(v)
-	on.autoDodge = v and true or false
-	setDodge("campaign", v)
-	UI.CreateNoti({ Title = "Auto Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
-end)
-tog.bossDodge = SDg.CreateToggle({ Title = "Boss Dodge", Desc = "Dodges hit circles only while a boss is alive", Default = false }, function(v)
-	on.bossDodge = v and true or false
-	setDodge("campaignBoss", v)
-	UI.CreateNoti({ Title = "Boss Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
-end)
-reg.bossName = SDg.CreateBox({ Title = "Boss name contains", Default = cfg.bossName }, function(v)
-	cfg.bossName = tostring(v or "")
-	save()
-end)
-reg.dodgePatterns = SDg.CreateBox({ Title = "Hit circle names", Default = cfg.dodgePatterns }, function(v)
-	cfg.dodgePatterns = tostring(v or "")
-	save()
-end)
-reg.dodgeMode = SDg.CreateDropdown({ Title = "Dodge mode", List = { "Safe", "Tween" }, Default = cfg.dodgeMode }, function(v)
-	cfg.dodgeMode = v
-	save()
-end)
-reg.dodgeSpeed = SDg.CreateSlider({ Title = "Dodge speed (Tween)", Min = 10, Max = 150, Default = tonumber(cfg.dodgeSpeed) or 60 }, function(v)
-	cfg.dodgeSpeed = v
-	save()
-end)
-reg.dodgeMargin = SDg.CreateSlider({ Title = "Safe distance outside circle", Min = 1, Max = 30, Default = tonumber(cfg.dodgeMargin) or 6 }, function(v)
-	cfg.dodgeMargin = v
-	save()
-end)
-SDg.CreateButton({ Title = "Show nearby flat parts" }, function()
-	local names = nearbyFlat(80)
-	if not names then
-		noti("Dodge", "Character not found", 3)
-	elseif #names == 0 then
-		noti("Dodge", "No flat parts within 80 studs", 4)
-	else
-		noti("Dodge", table.concat(names, " | "), 8)
-	end
-end)
-SDg.CreateLabel({ Title = "Stand next to a hit circle, press the button, then put its name in Hit circle names." })
-SDg.CreateLabel({ Title = "Names are comma separated, e.g. Telegraph,AOE" })
-
-local PageR = Main.CreatePage({ Page_Name = "Raid", Page_Title = "Raid" })
-local SRd = PageR.CreateSection("RAID BOSS DODGE")
-tog.raidDodge = SRd.CreateToggle({ Title = "Auto Dodge Boss", Desc = "Dodges the hit circles of the selected raid boss", Default = false }, function(v)
-	on.raidDodge = v and true or false
-	setDodge("raid", v)
-	UI.CreateNoti({ Title = "Raid Dodge", Desc = v and ("ON - " .. tostring(cfg.raidBoss)) or "OFF", ShowTime = 2 })
-end)
-local RAID_BOSS = {}
-for _, r in ipairs(RAIDS) do
-	RAID_BOSS[#RAID_BOSS + 1] = r[1]
-end
-local raidPatBox
-reg.raidBoss = SRd.CreateDropdown({ Title = "Raid name", List = RAID_BOSS, Default = cfg.raidBoss }, function(v)
-	cfg.raidBoss = v
-	save()
-	if raidPatBox then
-		pcall(raidPatBox.SetValue, cfg.raidPatterns[v] or "")
-	end
-end)
-raidPatBox = SRd.CreateBox({ Title = "Hit circle names (this raid)", Default = cfg.raidPatterns[cfg.raidBoss] or "" }, function(v)
-	cfg.raidPatterns[cfg.raidBoss] = tostring(v or "")
-	save()
-end)
-SRd.CreateLabel({ Title = "Each raid boss has its own mechanics: pick the raid, then set its circle names." })
-SRd.CreateLabel({ Title = "Empty = uses the general names from Campaign > Dodge. Speed/mode are shared." })
-
-local PageD = Main.CreatePage({ Page_Name = "Dungeon", Page_Title = "Dungeon" })
-local SDd = PageD.CreateSection("DUNGEON DODGE")
-tog.dungeonDodge = SDd.CreateToggle({ Title = "Auto Dodge", Desc = "Steps out of hit circles in the dungeon", Default = false }, function(v)
-	on.dungeonDodge = v and true or false
-	setDodge("dungeon", v)
-	UI.CreateNoti({ Title = "Dungeon Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
-end)
-SDd.CreateLabel({ Title = "Uses the general hit circle names and settings from Campaign > Dodge." })
 
 local PageS = Main.CreatePage({ Page_Name = "Settings", Page_Title = "Settings" })
 local SS = PageS.CreateSection("SETTINGS")
@@ -2343,7 +2607,7 @@ if autoName ~= "" and store.configs[autoName] then
 	end)
 end
 
-UI.CreateNoti({ Title = "Final Swarm v23", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v24", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
 
 -- Auto Minimize: hide the window like the "-" button does (the X logo stays and reopens it)
 if cfg.autoMinimize then

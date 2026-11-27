@@ -1,3 +1,4 @@
+-- Levian Hub: UI "Game not support yet" + tombol Request game script
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
@@ -98,26 +99,40 @@ close.AutoButtonColor = false
 close.Parent = box
 
 -- Tombol "Request game script"
+-- (gradient dipasang di Frame terpisah, supaya warna teks tidak ikut ter-gradient)
 local btn = Instance.new("TextButton")
 btn.AnchorPoint = Vector2.new(0.5, 0)
 btn.Position = UDim2.new(0.5, 0, 0, 70)
 btn.Size = UDim2.fromOffset(230, 38)
-btn.BackgroundColor3 = Color3.new(1, 1, 1)
+btn.BackgroundTransparency = 1
 btn.BorderSizePixel = 0
 btn.AutoButtonColor = false
 btn.Font = Enum.Font.GothamBold
 btn.TextSize = 14
 btn.TextColor3 = Color3.new(1, 1, 1)
 btn.Text = "Request game script"
+btn.ZIndex = 3
 btn.Parent = box
+
+local fill = Instance.new("Frame")
+fill.Size = UDim2.fromScale(1, 1)
+fill.BackgroundColor3 = Color3.new(1, 1, 1)
+fill.BorderSizePixel = 0
+fill.ZIndex = 1
+fill.Parent = btn
 do
 	local c = Instance.new("UICorner")
 	c.CornerRadius = UDim.new(0.5, 0)
-	c.Parent = btn
+	c.Parent = fill
 	local g = Instance.new("UIGradient")
 	g.Rotation = 0
-	g.Color = ColorSequence.new(C_LIGHT, C_DARK)
-	g.Parent = btn
+	g.Color = ColorSequence.new(Color3.fromRGB(150, 85, 255), Color3.fromRGB(105, 45, 215))
+	g.Parent = fill
+	local st = Instance.new("UIStroke")
+	st.Color = Color3.fromRGB(225, 200, 255)
+	st.Thickness = 1.5
+	st.Transparency = 0.35
+	st.Parent = fill
 end
 
 -- Label pengganti: "Already sent request"
@@ -144,7 +159,11 @@ end
 local function showDone(animated)
 	done.Visible = true
 	if animated then
-		tween(btn, 0.25, {BackgroundTransparency = 1, TextTransparency = 1}).Completed:Wait()
+		tween(fill, 0.25, {BackgroundTransparency = 1})
+		for _, d in ipairs(fill:GetChildren()) do
+			if d:IsA("UIStroke") then tween(d, 0.25, {Transparency = 1}) end
+		end
+		tween(btn, 0.25, {TextTransparency = 1}).Completed:Wait()
 		btn.Visible = false
 		tween(done, 0.3, {BackgroundTransparency = 0, TextTransparency = 0})
 	else
