@@ -167,6 +167,7 @@ local PARTY_SIZE = { Solo = 1, Duo = 2, Trio = 3, Squad = 4 }
 local RAIDS = {
 	{ "Colosseum", "Colosseum" },
 	{ "Sand Worm", "SandWorm" },
+	{ "Dragon Colosseum", "Dragon" },
 }
 local RAID_NAMES = { "None" }
 for _, r in ipairs(RAIDS) do
