@@ -13,7 +13,7 @@ local FILE = FOLDER .. "/" .. game:GetService("Players").LocalPlayer.Name .. "-f
 local cfg = {
 	mode = "Solo",
 	difficulty = "Normal",
-	map = "None",
+	map = "Volcano",
 	challenges = {},
 	raid = "None",
 	raidDifficulty = "Normal",
@@ -47,6 +47,12 @@ local cfg = {
 	dodgeSpeed = 60,
 	dodgeMargin = 6,
 	bossName = "Boss",
+	dodgeRed = true, -- also dodge flat red parts (lines), not only parts with a matching name
+	raidSelect = "Colosseum",
+	raidWait = 20, -- seconds to wait at a corner zone / statue
+	raidZones = "Capture,Corner", -- 75%: corner zones (names, comma separated)
+	raidStatues = "Statue", -- 50%: statues in the middle
+	raidRocks = "Rock,Stone,Platform", -- 25%: rocks above the lava
 	spyFilter = "World,Queue,Map,Difficulty,Challenge,Party,Raid,Dungeon", -- words a Remote Spy line must contain (empty = all)
 }
 pcall(function()
@@ -167,7 +173,6 @@ local PARTY_SIZE = { Solo = 1, Duo = 2, Trio = 3, Squad = 4 }
 local RAIDS = {
 	{ "Colosseum", "Colosseum" },
 	{ "Sand Worm", "SandWorm" },
-	{ "Dragon Colosseum", "Dragon" },
 }
 local RAID_NAMES = { "None" }
 for _, r in ipairs(RAIDS) do
@@ -216,6 +221,12 @@ local function joinOnce()
 	return true, ("Campaign: %s / %s / %s"):format(tostring(cfg.map), tostring(cfg.difficulty), tostring(cfg.mode))
 end
 
+-- the server may expect another spelling of the raid id: the ones below are tried in turn
+local RAID_ID_VARIANTS = {
+	SandWorm = { "SandWorm", "Sandworm", "Sand Worm", "sandworm", "Sand_Worm" },
+}
+local raidIdWorked = {}
+
 local function joinRaidOnce()
 	local id = raidId()
 	if not id then
@@ -226,26 +237,32 @@ local function joinRaidOnce()
 		return false, "Raid remotes not found - in the lobby?"
 	end
 	local size = PARTY_SIZE[cfg.raidMode] or 1
-	r.rqEvent:FireServer("SelectRaid", id)
-	task.wait(0.4)
-	r.wsEvent:FireServer("SetDifficulty", cfg.raidDifficulty)
-	task.wait(0.4)
-	local ok, res = pcall(function()
-		return r.rqFunc:InvokeServer("EnterQueue")
-	end)
-	if not ok then
-		return false, "EnterQueue error: " .. tostring(res)
+	local variants = { raidIdWorked[id] or id }
+	for _, v in ipairs(RAID_ID_VARIANTS[id] or {}) do
+		if v ~= variants[1] then
+			variants[#variants + 1] = v
+		end
 	end
-	if res ~= true then
-		return false, "EnterQueue rejected: " .. tostring(res)
+	local notes = {}
+	for _, rid in ipairs(variants) do
+		r.rqEvent:FireServer("SelectRaid", rid)
+		task.wait(0.4)
+		r.wsEvent:FireServer("SetDifficulty", cfg.raidDifficulty)
+		task.wait(0.4)
+		local ok, res = pcall(function()
+			return r.rqFunc:InvokeServer("EnterQueue")
+		end)
+		if ok and res == true then
+			raidIdWorked[id] = rid
+			task.wait(0.4)
+			r.rqEvent:FireServer("PartySizeSelected", size)
+			task.wait(0.3)
+			r.rqEvent:FireServer("Created")
+			return true, ("Raid: %s / %s / %s"):format(tostring(cfg.raid), tostring(cfg.raidDifficulty), tostring(cfg.raidMode))
+		end
+		notes[#notes + 1] = ('"%s" -> %s'):format(rid, ok and tostring(res) or ("error " .. tostring(res)))
 	end
-	task.wait(0.4)
-	r.rqEvent:FireServer("PartySizeSelected", size)
-	task.wait(0.3)
-	r.rqEvent:FireServer("Created")
-	return true, ("Raid: %s / %s / %s"):format(
-		tostring(cfg.raid), tostring(cfg.raidDifficulty), tostring(cfg.raidMode)
-	)
+	return false, ("EnterQueue rejected (%s): %s"):format(tostring(cfg.raidDifficulty), table.concat(notes, "; "))
 end
 
 local function joinDungeonOnce()
@@ -884,7 +901,8 @@ end
 local RunService = game:GetService("RunService")
 local bubbleAuto, bubbleToken = false, nil
 local bubbleBusy = false -- true while the bubble loop is moving the character
-local dodgeBusy = false -- true while Auto Dodge is stepping out of a hit circle (it has the highest priority)
+local dodgeBusy = false -- true while Auto Dodge / Auto Raid has control of the character (other loops wait)
+local dodgeHit, raidHold, raidLava = false, false, false -- dodgeBusy = dodgeHit or raidHold; raidLava = Auto Raid is moving over the lava rocks
 local bubbleCache, bubbleCacheAt, bubbleVisited = {}, 0, {}
 
 local function objPos(o)
@@ -1235,9 +1253,9 @@ end
 -- part size (half of its second-largest side, so flat discs and balls both work). If you stand inside one,
 -- you are moved straight out of it (Safe = Humanoid:MoveTo, Tween = fast CFrame steps at "Dodge speed").
 -- The names are a guess: stand next to a circle and press "Show nearby flat parts" to see the real names.
--- Auto Dodge (always) / Boss Dodge (only while a boss is alive).
+-- Auto Dodge (always) / Boss Dodge (only while a boss is alive) / Auto Raid (while it is on). Circles AND lines are avoided.
 local Players = game:GetService("Players")
-local dodgeOn = { campaign = false, campaignBoss = false }
+local dodgeOn = { campaign = false, campaignBoss = false, raid = false }
 local dodgeToken = nil
 local dodgeSet, dodgePats, dodgeKey = {}, {}, nil
 
@@ -1280,9 +1298,9 @@ end
 local function activePatterns()
 	local set, any = {}, false
 	local function add(list)
+		any = true
 		for _, p in ipairs(list) do
 			set[p] = true
-			any = true
 		end
 	end
 	local generic = splitNames(cfg.dodgePatterns)
@@ -1290,6 +1308,9 @@ local function activePatterns()
 		add(generic)
 	end
 	if dodgeOn.campaignBoss and bossExists() then
+		add(generic)
+	end
+	if dodgeOn.raid then
 		add(generic)
 	end
 	if not any then
@@ -1303,7 +1324,20 @@ local function activePatterns()
 	return out
 end
 
-local function isCircle(d)
+-- flat red parts (telegraph lines): thin, large, strongly red
+local function isRedFlat(d)
+	if not d:IsA("BasePart") or d:IsA("Terrain") or d.Transparency >= 0.95 then
+		return false
+	end
+	local c = d.Color
+	if not (c.R > 0.65 and c.G < 0.4 and c.B < 0.4) then
+		return false
+	end
+	local sz = d.Size
+	return math.min(sz.X, sz.Y, sz.Z) <= 3 and math.max(sz.X, sz.Y, sz.Z) >= 4
+end
+
+local function isHazard(d)
 	if not (d:IsA("BasePart") or d:IsA("Model")) or d:IsA("Terrain") then
 		return false
 	end
@@ -1315,29 +1349,74 @@ local function isCircle(d)
 			break
 		end
 	end
-	if not hit then
+	if not hit and not (cfg.dodgeRed and isRedFlat(d)) then
 		return false
 	end
 	local m = d:IsA("Model") and d or d:FindFirstAncestorOfClass("Model")
 	return not (m and Players:GetPlayerFromCharacter(m))
 end
 
-local function circleOf(d)
+-- Is `pos` inside the hazard d (grown by `grow` studs)? Returns the penetration depth (0 = outside) and the nearest
+-- point outside (exitMargin studs past the edge, same height as pos).
+-- A hazard is the flat plane of the part (its thinnest side is ignored): nearly square = circle, long = line/rectangle.
+local function probe(d, pos, grow, exitMargin)
 	local cf, size
 	if d:IsA("Model") then
 		cf, size = d:GetBoundingBox()
 	else
 		cf, size = d.CFrame, d.Size
 	end
-	local t = { size.X, size.Y, size.Z }
-	table.sort(t)
-	return cf.Position, t[2] / 2
+	local dims = { { size.X, "X" }, { size.Y, "Y" }, { size.Z, "Z" } }
+	table.sort(dims, function(p, q)
+		return p[1] < q[1]
+	end)
+	local tn, an, bn = dims[1][2], dims[2][2], dims[3][2]
+	local ha, hb = dims[2][1] / 2, dims[3][1] / 2
+	if hb < 2 or hb > 200 then
+		return 0
+	end
+	local lp = cf:PointToObjectSpace(pos)
+	if math.abs(lp[tn]) > 60 then
+		return 0
+	end
+	local la, lb = lp[an], lp[bn]
+	local round = (d:IsA("Part") and d.Shape == Enum.PartType.Ball) or hb / math.max(ha, 0.01) < 1.25
+	local ra, rb, pen
+	if round then
+		local r = (ha + hb) / 2
+		local dist = math.sqrt(la * la + lb * lb)
+		pen = r + grow - dist
+		if pen <= 0 then
+			return 0
+		end
+		local ux, uz = la, lb
+		if dist < 0.1 then
+			ux, uz, dist = 1, 0, 1
+		end
+		ra, rb = ux / dist * (r + exitMargin), uz / dist * (r + exitMargin)
+	else
+		local ia, ib = ha + grow - math.abs(la), hb + grow - math.abs(lb)
+		if ia <= 0 or ib <= 0 then
+			return 0
+		end
+		pen = math.min(ia, ib)
+		ra, rb = la, lb
+		if ia <= ib then
+			ra = (la >= 0 and 1 or -1) * (ha + exitMargin)
+		else
+			rb = (lb >= 0 and 1 or -1) * (hb + exitMargin)
+		end
+	end
+	local v = { X = 0, Y = 0, Z = 0 }
+	v[an], v[bn], v[tn] = ra, rb, lp[tn]
+	local w = cf:PointToWorldSpace(Vector3.new(v.X, v.Y, v.Z))
+	return pen, Vector3.new(w.X, pos.Y, w.Z)
 end
 
 local dodgeConns = {}
 local function startIndex()
 	dodgeConns[#dodgeConns + 1] = workspace.DescendantAdded:Connect(function(d)
-		if dodgeKey and isCircle(d) then
+		if dodgeKey and isHazard(d) then
 			dodgeSet[d] = true
 		end
 	end)
@@ -1351,72 +1430,87 @@ local function stopIndex()
 	end
 	dodgeConns, dodgeSet, dodgeKey = {}, {}, nil
 end
-local function refreshIndex(pats)
-	local key = table.concat(pats, ",")
-	if key == dodgeKey then
-		return
-	end
-	dodgeKey, dodgePats, dodgeSet = key, pats, {}
+local function rescan()
 	for _, d in ipairs(workspace:GetDescendants()) do
-		if isCircle(d) then
+		if not dodgeSet[d] and isHazard(d) then
 			dodgeSet[d] = true
 		end
 	end
 end
+local function refreshIndex(pats)
+	local key = table.concat(pats, ",") .. "|" .. tostring(cfg.dodgeRed)
+	if key == dodgeKey then
+		return
+	end
+	dodgeKey, dodgePats, dodgeSet = key, pats, {}
+	rescan()
+end
+
+-- deepest hazard overlap at a position (used by Auto Raid to find safe rocks)
+local function hazardPen(pos, grow)
+	local best = 0
+	for d in pairs(dodgeSet) do
+		if d.Parent and (not d:IsA("BasePart") or d.Transparency < 1) then
+			local pen = probe(d, pos, grow, 0)
+			if pen > best then
+				best = pen
+			end
+		end
+	end
+	return best
+end
 
 local function dodgeLoop(token)
 	startIndex()
-	local lastDanger = 0
+	local lastDanger, lastScan = 0, 0
 	while dodgeToken == token do
 		local pats = activePatterns()
 		local char = Players.LocalPlayer.Character
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not pats or not hrp or not hum or hum.Health <= 0 then
-			dodgeBusy = false
+			dodgeHit, dodgeBusy = false, raidHold
 			task.wait(0.25)
 		else
 			refreshIndex(pats)
-			local worst, wpos, wr, wpen = nil, nil, nil, 0
-			for d in pairs(dodgeSet) do
-				if d.Parent and not d:IsDescendantOf(char) and (not d:IsA("BasePart") or d.Transparency < 1) then
-					local pos, r = circleOf(d)
-					if r >= 2 and r <= 200 and math.abs(hrp.Position.Y - pos.Y) < 80 then
-						local dx, dz = hrp.Position.X - pos.X, hrp.Position.Z - pos.Z
-						local pen = r + 1 - math.sqrt(dx * dx + dz * dz)
+			if cfg.dodgeRed and os.clock() - lastScan > 2 then
+				lastScan = os.clock()
+				rescan() -- picks up parts that turned red after they were created
+			end
+			if raidLava then
+				dodgeHit, dodgeBusy = false, raidHold -- Auto Raid moves between rocks itself
+				task.wait(0.1)
+			else
+				local margin = math.clamp(tonumber(cfg.dodgeMargin) or 6, 1, 40)
+				local wpen, wtgt = 0, nil
+				for d in pairs(dodgeSet) do
+					if d.Parent and not d:IsDescendantOf(char) and (not d:IsA("BasePart") or d.Transparency < 1) then
+						local pen, tgt = probe(d, hrp.Position, 1, margin)
 						if pen > wpen then
-							worst, wpos, wr, wpen = d, pos, r, pen
+							wpen, wtgt = pen, tgt
 						end
 					end
 				end
-			end
-			local dt = RunService.Heartbeat:Wait()
-			if worst then
-				dodgeBusy, lastDanger = true, os.clock()
-				local dx, dz = hrp.Position.X - wpos.X, hrp.Position.Z - wpos.Z
-				local len = math.sqrt(dx * dx + dz * dz)
-				if len < 0.1 then
-					local a = math.random() * math.pi * 2
-					dx, dz, len = math.cos(a), math.sin(a), 1
-				end
-				local margin = math.clamp(tonumber(cfg.dodgeMargin) or 6, 1, 40)
-				local tx, tz = wpos.X + dx / len * (wr + margin), wpos.Z + dz / len * (wr + margin)
-				if cfg.dodgeMode == "Safe" then
-					hum:MoveTo(Vector3.new(tx, hrp.Position.Y, tz))
-				else
-					local to = Vector3.new(tx, hrp.Position.Y, tz) - hrp.Position
-					local step = math.min(math.max(tonumber(cfg.dodgeSpeed) or 60, 5) * dt, to.Magnitude)
-					if to.Magnitude > 0.01 then
-						hrp.CFrame = hrp.CFrame + to.Unit * step
+				local dt = RunService.Heartbeat:Wait()
+				if wtgt then
+					dodgeHit, dodgeBusy, lastDanger = true, true, os.clock()
+					if cfg.dodgeMode == "Safe" then
+						hum:MoveTo(wtgt)
+					else
+						local to = wtgt - hrp.Position
+						local step = math.min(math.max(tonumber(cfg.dodgeSpeed) or 60, 5) * dt, to.Magnitude)
+						if to.Magnitude > 0.01 then
+							hrp.CFrame = hrp.CFrame + to.Unit * step
+						end
+						hrp.AssemblyLinearVelocity = Vector3.zero
 					end
-					hrp.AssemblyLinearVelocity = Vector3.zero
+				elseif dodgeHit and os.clock() - lastDanger > 0.4 then
+					dodgeHit, dodgeBusy = false, raidHold
 				end
-			elseif dodgeBusy and os.clock() - lastDanger > 0.4 then
-				dodgeBusy = false
 			end
 		end
 	end
-	dodgeBusy = false
+	dodgeHit, dodgeBusy = false, raidHold
 	stopIndex()
 end
 
@@ -1501,6 +1595,312 @@ local function nearbyFlat(radius)
 		out[i] = list[i].n
 	end
 	return out
+end
+
+---------------------------------------------------------------- auto raid (Colosseum)
+-- Plays the boss phases by the boss health (the boss = the non-player Humanoid matching "Boss name contains",
+-- otherwise the one with the most max health):
+--   75%  corner zones : visit each zone and stay until it is full (gone) or "Max wait" ran out, like Auto Rift
+--   50%  statues      : stay next to each statue in the middle until it is destroyed (the weapons hit it)
+--   25%  lava         : stand on the rocks; when a hit zone covers your rock (or you are off the rocks) hop to the
+--                       nearest rock that is not covered. Auto Dodge's pushing is paused during this phase.
+-- While Auto Raid is on, hit zone dodging is on too. The object names are guesses: use the Raid tab buttons.
+local RAID = {}
+do
+	local running, token = false, nil
+	local bossH, bossAt = nil, 0
+	local visited = {}
+	local cache = {}
+
+	local function hold(v)
+		raidHold = v
+		dodgeBusy = dodgeHit or v
+	end
+
+	local function findBoss()
+		if bossH and bossH.Parent and bossH.Health > 0 and os.clock() - bossAt < 3 then
+			return bossH
+		end
+		bossAt, bossH = os.clock(), nil
+		local pat, best = norm(cfg.bossName), 0
+		for _, h in ipairs(workspace:GetDescendants()) do
+			if h:IsA("Humanoid") and h.Health > 0 and h.Parent and not Players:GetPlayerFromCharacter(h.Parent) then
+				local byName = pat ~= "" and (norm(h.Parent.Name):find(pat, 1, true) or norm(h.DisplayName):find(pat, 1, true))
+				local score = h.MaxHealth + (byName and 1e12 or 0)
+				if score > best then
+					best, bossH = score, h
+				end
+			end
+		end
+		return bossH
+	end
+
+	-- objects (parts/models) whose name contains one of the words; cached for 1 second
+	local function find(names)
+		local c = cache[names]
+		if not c or os.clock() - c.at > 1 then
+			c = { at = os.clock(), list = {} }
+			cache[names] = c
+			local pats, found, set = splitNames(names), {}, {}
+			if #pats > 0 then
+				for _, d in ipairs(workspace:GetDescendants()) do
+					if (d:IsA("BasePart") or d:IsA("Model")) and not d:IsA("Terrain") then
+						local n = norm(d.Name)
+						for _, p in ipairs(pats) do
+							if n:find(p, 1, true) then
+								local m = d:IsA("Model") and d or d:FindFirstAncestorOfClass("Model")
+								if not (m and Players:GetPlayerFromCharacter(m)) then
+									found[#found + 1] = d
+									set[d] = true
+								end
+								break
+							end
+						end
+					end
+				end
+				for _, d in ipairs(found) do
+					local nested, p = false, d.Parent
+					while p and p ~= workspace do
+						if set[p] then
+							nested = true
+							break
+						end
+						p = p.Parent
+					end
+					if not nested then
+						c.list[#c.list + 1] = d
+					end
+				end
+			end
+		end
+		local out = {}
+		for _, d in ipairs(c.list) do
+			if d.Parent then
+				out[#out + 1] = d
+			end
+		end
+		return out
+	end
+
+	local function walkTo(hrp, hum, pos)
+		if cfg.dodgeMode == "Safe" then
+			hum:MoveTo(pos)
+			task.wait(0.2)
+		else
+			local dir = pos - hrp.Position
+			local dt = RunService.Heartbeat:Wait()
+			local step = math.min(math.max(tonumber(cfg.dodgeSpeed) or 60, 5) * dt, dir.Magnitude)
+			if dir.Magnitude > 0.01 then
+				hrp.CFrame = hrp.CFrame + dir.Unit * step
+			end
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end
+	end
+
+	-- go to the nearest zone/statue that was not visited lately and stay there
+	local function visit(list, hrp, hum, tok, stayDist)
+		local best, bd
+		for _, d in ipairs(list) do
+			if not visited[d] or os.clock() - visited[d] > 30 then
+				local dist = (objPos(d) - hrp.Position).Magnitude
+				if not bd or dist < bd then
+					best, bd = d, dist
+				end
+			end
+		end
+		if not best then
+			visited = {} -- all done: start over while they still exist
+			task.wait(0.3)
+			return
+		end
+		local t0, arrivedAt = os.clock(), nil
+		local maxWait = tonumber(cfg.raidWait) or 20
+		while running and token == tok and best.Parent and hrp.Parent and hum.Health > 0 do
+			if dodgeHit then
+				task.wait(0.1)
+				t0 = t0 + 0.1
+				if arrivedAt then
+					arrivedAt = arrivedAt + 0.1
+				end
+			else
+				local pos = objPos(best)
+				if (pos - hrp.Position).Magnitude < stayDist then
+					arrivedAt = arrivedAt or os.clock()
+					if os.clock() - arrivedAt > maxWait then
+						break
+					end
+					task.wait(0.2) -- stay: the bar fills / the statue gets hit
+				else
+					if os.clock() - t0 > 25 then
+						break
+					end
+					walkTo(hrp, hum, pos)
+				end
+			end
+		end
+		if not dodgeHit then
+			visited[best] = os.clock()
+		end
+	end
+
+	local function isRock(inst, rocks)
+		for _, r in ipairs(rocks) do
+			if inst == r or inst:IsDescendantOf(r) then
+				return true
+			end
+		end
+		return false
+	end
+	local function rockPoint(r)
+		if r:IsA("Model") then
+			local cf, size = r:GetBoundingBox()
+			return cf.Position + Vector3.new(0, size.Y / 2 + 3, 0)
+		end
+		return r.Position + Vector3.new(0, r.Size.Y / 2 + 3, 0)
+	end
+
+	-- one lava step; false = no rocks (the lava phase is over / not started)
+	local function lavaStep(hrp, hum, char)
+		local rocks = find(cfg.raidRocks)
+		if #rocks == 0 then
+			return false
+		end
+		local here = hrp.Position
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = { char }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local hit = workspace:Raycast(here, Vector3.new(0, -10, 0), params)
+		local onRock = hit ~= nil and isRock(hit.Instance, rocks)
+		if onRock and hazardPen(here, 3) <= 0 then
+			task.wait(0.05) -- safe on a rock: stay
+			return true
+		end
+		local best, bs
+		for _, r in ipairs(rocks) do
+			local p = rockPoint(r)
+			local dist = (p - here).Magnitude
+			if dist > 4 and dist < 150 then
+				local pen = hazardPen(p, 5)
+				local score = (pen > 0 and 1000 + pen or 0) + dist
+				if not bs or score < bs then
+					best, bs = p, score
+				end
+			end
+		end
+		if best then
+			hum.Jump = true -- hop
+			local dir = best - here
+			local dt = RunService.Heartbeat:Wait()
+			local step = math.min(math.max(tonumber(cfg.dodgeSpeed) or 60, 60) * dt, dir.Magnitude)
+			hrp.CFrame = hrp.CFrame + dir.Unit * step
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		else
+			task.wait(0.1)
+		end
+		return true
+	end
+
+	local function loop(tok)
+		while running and token == tok do
+			local char = Players.LocalPlayer.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local bh = (hrp and hum and hum.Health > 0 and cfg.raidSelect == "Colosseum") and findBoss() or nil
+			if not bh then
+				raidLava = false
+				hold(false)
+				task.wait(0.6)
+			else
+				local pct = bh.MaxHealth > 0 and bh.Health / bh.MaxHealth * 100 or 100
+				local zones, statues
+				if pct <= 51 then
+					statues = find(cfg.raidStatues)
+				end
+				if pct <= 76 then
+					zones = find(cfg.raidZones)
+				end
+				if pct <= 26 and #find(cfg.raidRocks) > 0 then
+					raidLava = true
+					hold(true)
+					lavaStep(hrp, hum, char)
+				elseif statues and #statues > 0 then
+					raidLava = false
+					hold(true)
+					visit(statues, hrp, hum, tok, 7)
+				elseif zones and #zones > 0 then
+					raidLava = false
+					hold(true)
+					visit(zones, hrp, hum, tok, 3)
+				else
+					raidLava = false
+					hold(false)
+					task.wait(0.4)
+				end
+			end
+		end
+		raidLava = false
+		hold(false)
+	end
+
+	function RAID.set(on)
+		if on then
+			if running then
+				return
+			end
+			running, token = true, {}
+			setDodge("raid", true)
+			task.spawn(loop, token)
+		else
+			running, token = false, nil
+			setDodge("raid", false)
+			raidLava = false
+			hold(false)
+		end
+	end
+
+	function RAID.status()
+		local h = findBoss()
+		if not h then
+			return "Boss not found"
+		end
+		local pct = h.MaxHealth > 0 and math.floor(h.Health / h.MaxHealth * 100 + 0.5) or 0
+		return ("%s %d%% | zones %d | statues %d | rocks %d"):format(
+			h.Parent and h.Parent.Name or "?", pct, #find(cfg.raidZones), #find(cfg.raidStatues), #find(cfg.raidRocks)
+		)
+	end
+
+	-- model/part names near you, nearest first (to find the real zone / statue / rock names)
+	function RAID.nearby(radius)
+		local char = Players.LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then
+			return nil
+		end
+		local best = {}
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if (d:IsA("Model") or d:IsA("BasePart")) and not d:IsA("Terrain") and d.Name ~= "HumanoidRootPart" then
+				local m = d:IsA("Model") and d or d:FindFirstAncestorOfClass("Model")
+				if not (m and Players:GetPlayerFromCharacter(m)) and not d:IsA("Humanoid") then
+					local dist = (objPos(d) - hrp.Position).Magnitude
+					if dist <= radius and (not best[d.Name] or dist < best[d.Name]) then
+						best[d.Name] = dist
+					end
+				end
+			end
+		end
+		local list = {}
+		for n, dist in pairs(best) do
+			list[#list + 1] = { n = n, d = dist }
+		end
+		table.sort(list, function(a, b)
+			return a.d < b.d
+		end)
+		local out = {}
+		for i = 1, math.min(#list, 14) do
+			out[i] = list[i].n
+		end
+		return out
+	end
 end
 
 ---------------------------------------------------------------- after match (replay / lobby)
@@ -1799,7 +2199,7 @@ end
 
 -- reg: setting key -> menu control, tog: toggle name -> menu control, on: current state of the runtime toggles
 local reg, tog = {}, {}
-local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, autoFarm = false, autoDodge = false, bossDodge = false }
+local on = { autoJoin = false, autoCard = false, autoBubble = false, autoRift = false, autoFarm = false, autoDodge = false, bossDodge = false, autoRaid = false }
 local SKIP = { pressMethod = true }
 local function snapshot()
 	local copy = {}
@@ -2236,11 +2636,15 @@ do
 		setDodge("campaignBoss", v)
 		UI.CreateNoti({ Title = "Boss Dodge", Desc = v and "ON" or "OFF", ShowTime = 2 })
 	end)
+	reg.dodgeRed = SDg.CreateToggle({ Title = "Dodge red zones / lines", Desc = "Also avoids flat red parts, not only parts with a matching name", Default = cfg.dodgeRed }, function(v)
+		cfg.dodgeRed = v and true or false
+		save()
+	end)
 	reg.bossName = SDg.CreateBox({ Title = "Boss name contains", Default = cfg.bossName }, function(v)
 		cfg.bossName = tostring(v or "")
 		save()
 	end)
-	reg.dodgePatterns = SDg.CreateBox({ Title = "Hit circle names", Default = cfg.dodgePatterns }, function(v)
+	reg.dodgePatterns = SDg.CreateBox({ Title = "Hit zone names", Default = cfg.dodgePatterns }, function(v)
 		cfg.dodgePatterns = tostring(v or "")
 		save()
 	end)
@@ -2276,7 +2680,7 @@ do
 			noti("Dodge", table.concat(names, " | ") .. (bossExists() and "  (boss found)" or "  (no boss matched)"), 8)
 		end
 	end)
-	SDg.CreateLabel({ Title = "Stand next to a hit circle, press 'Show nearby flat parts', then put its name in Hit circle names." })
+	SDg.CreateLabel({ Title = "Stand next to a hit circle, press 'Show nearby flat parts', then put its name in Hit zone names." })
 	SDg.CreateLabel({ Title = "Names are comma separated, e.g. Telegraph,AOE." })
 end
 
@@ -2361,6 +2765,48 @@ end)
 SA.CreateLabel({ Title = "Skips Victory/Defeat screens, then presses Again or Lobby." })
 SA.CreateLabel({ Title = "Keep the menu hidden: it clicks the middle of the screen." })
 
+
+do
+	local PageR = Main.CreatePage({ Page_Name = "Raid", Page_Title = "Raid" })
+	local SRa = PageR.CreateSection("AUTO RAID")
+	tog.autoRaid = SRa.CreateToggle({ Title = "Auto Raid", Desc = "Plays the boss phases of the selected raid", Default = false }, function(v)
+		on.autoRaid = v and true or false
+		RAID.set(v)
+		UI.CreateNoti({ Title = "Auto Raid", Desc = v and ("ON - " .. tostring(cfg.raidSelect)) or "OFF", ShowTime = 2 })
+	end)
+	reg.raidSelect = SRa.CreateDropdown({ Title = "Raid", List = { "Colosseum" }, Default = cfg.raidSelect }, function(v)
+		cfg.raidSelect = v
+		save()
+	end)
+	reg.raidWait = SRa.CreateSlider({ Title = "Max wait per zone / statue (s)", Min = 5, Max = 60, Default = tonumber(cfg.raidWait) or 20 }, function(v)
+		cfg.raidWait = v
+		save()
+	end)
+	reg.raidZones = SRa.CreateBox({ Title = "75% corner zone names", Default = cfg.raidZones }, function(v)
+		cfg.raidZones = tostring(v or "")
+		save()
+	end)
+	reg.raidStatues = SRa.CreateBox({ Title = "50% statue names", Default = cfg.raidStatues }, function(v)
+		cfg.raidStatues = tostring(v or "")
+		save()
+	end)
+	reg.raidRocks = SRa.CreateBox({ Title = "25% lava rock names", Default = cfg.raidRocks }, function(v)
+		cfg.raidRocks = tostring(v or "")
+		save()
+	end)
+	SRa.CreateButton({ Title = "Show raid status" }, function()
+		noti("Raid", RAID.status(), 6)
+	end)
+	SRa.CreateButton({ Title = "Show nearby objects" }, function()
+		local names = RAID.nearby(120)
+		if not names then
+			noti("Raid", "Character not found", 3)
+		else
+			noti("Raid", table.concat(names, " | "), 10)
+		end
+	end)
+	SRa.CreateLabel({ Title = "Boss name: Farm Setting > Boss name contains (empty = the boss with the most health)." })
+end
 
 local PageS = Main.CreatePage({ Page_Name = "Settings", Page_Title = "Settings" })
 local SS = PageS.CreateSection("SETTINGS")
@@ -2474,7 +2920,7 @@ if autoName ~= "" and store.configs[autoName] then
 	end)
 end
 
-UI.CreateNoti({ Title = "Final Swarm v25", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
+UI.CreateNoti({ Title = "Final Swarm v26", Desc = "Menu ready. Pick a mode, then Join Now.", ShowTime = 5 })
 
 -- Auto Minimize: hide the window like the "-" button does (the X logo stays and reopens it)
 if cfg.autoMinimize then
