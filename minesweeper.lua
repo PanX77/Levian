@@ -1,12 +1,6 @@
 --[[
 	Levian Hub - bLockerman's Minesweeper
 	Auto Farm: minesweeper solver + flag mines + walk to safe blocks.
-
-	- Mines can't be read from the client. The bot deduces them from the revealed numbers
-	  and only acts on what is CERTAIN.
-	- The avatar only walks over opened blocks, then steps on blocks that are certainly safe.
-	- Flags: PlaceFlag needs a token that changes every session. The script reads it from the game
-	  itself (needs an executor with filtergc).
 ]]
 
 ---------------------------------------------------------------- load UI
