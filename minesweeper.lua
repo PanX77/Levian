@@ -25,13 +25,13 @@ local LP = Players.LocalPlayer
 local F = {
 	Run = false,
 	Busy = false,
-	Guess = false, -- guess when stuck (risky)
-	Human = true, -- walking style: randomized route and target
+	Guess = false,
+	Human = true,
 	Flagging = true,
-	PassFlags = true, -- allow walking over flagged blocks (shorter routes)
-	FlagRange = 12, -- stud
+	PassFlags = true,
+	FlagRange = 12,
 	Delay = 0.15,
-	CellSize = 5, -- size of 1 cell (studs)
+	CellSize = 5,
 	failed = {},
 	AutoEvent = false, -- press "Yes" on the event round vote
 	AutoSecret = false, -- spam "Yes" until the secret event vote shows up
@@ -40,9 +40,8 @@ local F = {
 	pressing = false,
 	abort = false, -- set by the watchdog when the game ends/restarts: all walking and flagging stops
 	WatchBusy = false,
-	firedAt = {}, -- cell key -> time PlaceFlag was last fired on it
-	firedCount = {}, -- cell key -> times PlaceFlag was fired on it this game (max 2)
-	-- manual solver (ESP + auto-flag)
+	firedAt = {},
+	firedCount = {},
 	ManualSafe = true,
 	ManualBomb = true,
 	ManualHalf = true,
@@ -54,7 +53,6 @@ local F = {
 }
 
 ---------------------------------------------------------------- settings (JSON)
--- saved to: Levian Hub/<PlayerName>-minesweeper.json
 local SETTINGS_KEYS = {
 	"Guess", "Human", "Flagging", "PassFlags", "FlagRange", "Delay",
 	"AutoEvent", "AutoSecret", "ScreenClick",
@@ -78,7 +76,6 @@ local function loadSettings()
 	end
 end
 
--- debounced: sliders fire many times while dragging, the file is written once
 local function saveSettings()
 	if not F.settingsReady then
 		return
@@ -103,10 +100,9 @@ local function saveSettings()
 end
 
 loadSettings()
-local flagTemplate -- PlaceFlag arguments (the part is swapped when used)
+local flagTemplate
 
----------------------------------------------------------------- util
--- this game names instances with many newlines; replace them with "¶" to keep logs tidy
+----------------------------------------------------------------
 local function path(i)
 	local ok, n = pcall(function()
 		return i:GetFullName()
@@ -164,8 +160,6 @@ local function push(line)
 end
 
 ---------------------------------------------------------------- token
--- the real flag token: an upvalue of the game's own ReplicatedFirst.MouseControl closure that references "PlaceFlag"
--- (needs filtergc; same technique as the open-source solver)
 local function findFlagToken()
 	if not filtergc then
 		return nil
@@ -190,8 +184,6 @@ local function findFlagToken()
 	return nil
 end
 
--- make sure Auto Farm has the flag arguments: read the game's own token (retried every 2s until the game's
--- code is loaded; no test shots, no guessing).
 local nextTokenTry = 0
 local function ensureTemplate()
 	if flagTemplate or os.clock() < nextTokenTry then
@@ -205,9 +197,9 @@ local function ensureTemplate()
 	end
 end
 
----------------------------------------------------------------- AUTO FARM (minesweeper solver)
-local proveMines -- set by the Manual module: mines proven by the stronger solver (key -> part)
-local guessTiles -- set by the Manual module: safe / lowest-risk tiles in the same order as the Manual ESP
+---------------------------------------------------------------- AUTO FARM
+local proveMines
+local guessTiles
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 local function dirs()
 	if not F.Human then
@@ -235,7 +227,6 @@ local function flagged(part)
 	return part:FindFirstChildWhichIsA("Model") ~= nil
 end
 
--- the cell size follows the board (some themes/modes use other tile sizes)
 local function syncCellSize()
 	local f = workspace:FindFirstChild("Flag")
 	local parts = f and f:FindFirstChild("Parts")
@@ -245,10 +236,6 @@ local function syncCellSize()
 	end
 end
 
--- Reads a tile exactly like the Manual solver does, with NO colors, so it works on every board theme:
---   no NumberGui      -> unopened ("flag" if it carries a flag Model)
---   NumberGui text    -> "" = 0, "1".."8" = clue; "X" or anything else = treated like a flag (never walked on)
--- state: flag | num | unk | pending (flag fired, not visible yet)
 local function makeCell(p)
 	local x = math.floor(p.Position.X / F.CellSize + 0.5)
 	local z = math.floor(p.Position.Z / F.CellSize + 0.5)
@@ -269,7 +256,7 @@ local function makeCell(p)
 	if c.state == "unk" then
 		local t = F.firedAt[c.key]
 		if t and os.clock() - t < 6 then
-			c.state = "pending" -- flag fired, not visible yet: counts as a mine, never walkable
+			c.state = "pending"
 		end
 	end
 	return c
@@ -308,7 +295,6 @@ local function nbrs(B, c)
 	return out
 end
 
--- solver: basic rule + subset rule. Only marks what is CERTAIN.
 local function solve(B)
 	local cons = {}
 	for _, c in ipairs(B.list) do
@@ -413,7 +399,6 @@ local function curCell(B)
 	return B.cells[ckey(math.floor(hrp.Position.X / F.CellSize + 0.5), math.floor(hrp.Position.Z / F.CellSize + 0.5))]
 end
 
--- cancel the current walk immediately
 local function stopWalking()
 	local char = LP.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -425,7 +410,6 @@ local function stopWalking()
 	end
 end
 
--- wait until the stepped block opens (checks every 0.02s) instead of a fixed delay
 local function waitRevealed(cell)
 	local t0 = os.clock()
 	while F.Run and not F.abort and os.clock() - t0 < 0.6 do
@@ -448,11 +432,10 @@ local function moveTo(cell, straight)
 	local tx, tz = cell.part.Position.X, cell.part.Position.Z
 	local thr = 1.2
 	if F.Human then
-		-- slightly off-center (max 0.3 stud), still far from the cell edge
 		tx += (math.random() - 0.5) * 0.6
 		tz += (math.random() - 0.5) * 0.6
 		if straight then
-			thr = 2.2 -- straight path: continue to the next cell without stopping at the center
+			thr = 2.2
 		end
 	end
 	local t0 = os.clock()
@@ -470,8 +453,6 @@ local function moveTo(cell, straight)
 	return false
 end
 
--- walk through opened cells (4 directions) to a neighbor matching pred, then step on it.
--- Always the nearest; route and ties are randomized in Human mode.
 local function stepToward(B, cur, pred)
 	if F.abort then
 		return false
@@ -503,7 +484,6 @@ local function stepToward(B, cur, pred)
 	if #cands == 0 then
 		return false
 	end
-	-- always the nearest route; if several are equally near, pick randomly (human-like mode)
 	local best, ties = dist[cands[1].c.key], {}
 	for _, cd in ipairs(cands) do
 		if dist[cd.c.key] == best then
@@ -534,7 +514,6 @@ local function stepToward(B, cur, pred)
 	return true, pick.n
 end
 
--- flag: reuse the arguments learned from the last manual PlaceFlag, only swapping the part
 local function getFlagRemote()
 	local ok, r = pcall(function()
 		return game:GetService("ReplicatedStorage").Events.FlagEvents.PlaceFlag
@@ -547,7 +526,6 @@ end
 local function cellKeyOf(part)
 	return ckey(math.floor(part.Position.X / F.CellSize + 0.5), math.floor(part.Position.Z / F.CellSize + 0.5))
 end
--- PlaceFlag toggles/replaces on an already flagged cell, so each cell gets at most 2 fires per game
 local function fireFlag(part)
 	local remote = getFlagRemote()
 	if F.abort or not remote or not flagTemplate then
@@ -576,8 +554,6 @@ local function waitFlag(part, t)
 	end
 	return false
 end
--- like the Manual auto-flag: fire PlaceFlag straight at the tile (no walking, no second shot);
--- a tile that does not show a flag is not tried again until the next game
 local function flagCell(B, cell, src)
 	if F.abort then
 		return false
@@ -592,7 +568,6 @@ local function flagCell(B, cell, src)
 	if F.abort then
 		return false
 	end
-	-- maybe the token changed: read it again and, if it differs, shoot once more
 	local tk = findFlagToken()
 	if tk and tostring(flagTemplate[2]) ~= tk then
 		flagTemplate = { n = 3, [2] = tk, [3] = true }
@@ -608,7 +583,6 @@ local function flagCell(B, cell, src)
 	return false
 end
 
--- nearest unflagged mine (within range)
 local function pickMine(mineK, pos, maxDist)
 	local best, bd
 	for key, m in pairs(mineK) do
@@ -623,8 +597,6 @@ local function pickMine(mineK, pos, maxDist)
 	return best
 end
 
--- watchdog: sets F.abort the moment the game ends or restarts (teleport, death, board reset),
--- so every walk/flag in progress stops instead of running on stale data
 local function watchdog()
 	local lastPos, lastRev, lastCheck
 	while F.Run do
@@ -638,7 +610,7 @@ local function watchdog()
 		else
 			local pos = hrp.Position
 			if lastPos and (pos - lastPos).Magnitude > 20 then
-				F.abort = true -- teleported (walking is only ~2 studs per 0.1s)
+				F.abort = true
 			end
 			lastPos = pos
 		end
@@ -653,7 +625,7 @@ local function watchdog()
 					end
 				end
 				if lastRev and n < lastRev then
-					F.abort = true -- opened cell count dropped: the board was reset
+					F.abort = true
 				end
 				lastRev = n
 			end
@@ -678,7 +650,7 @@ local function farmLoop()
 	F.Busy = true
 	resetFlags()
 	local notified, lastRevealed, tplSeen = false, 0, flagTemplate
-	local quick = false -- true after stepping: continue without delay
+	local quick = false
 	while F.Run do
 		if quick then
 			task.wait()
@@ -687,7 +659,7 @@ local function farmLoop()
 		end
 		quick = false
 		if F.abort then
-			F.abort = false -- the watchdog saw the game end/restart: everything in progress already stopped
+			F.abort = false
 			stopWalking()
 		end
 		local char = LP.Character
@@ -703,7 +675,6 @@ local function farmLoop()
 			continue
 		end
 
-		-- new game (opened cell count dropped) or new template: reset failed-flag records
 		local nRev = 0
 		for _, c in ipairs(B.list) do
 			if revealed(c) then
@@ -741,8 +712,6 @@ local function farmLoop()
 		end
 		local canFlag = F.Flagging and flagTemplate ~= nil
 		local acted, stepped = false, false
-
-		-- 1) flag every proven mine within range, nearest first (no walking, like the Manual auto-flag)
 		if canFlag then
 			for _ = 1, 8 do
 				if not F.Run or F.abort then
@@ -759,7 +728,6 @@ local function farmLoop()
 			end
 		end
 
-		-- 2) walk to the nearest safe block
 		cur = curCell(B)
 		if F.Run and not F.abort and cur and standable(cur) and next(safeK) then
 			local okStep, tgt = stepToward(B, cur, function(n)
@@ -777,8 +745,6 @@ local function farmLoop()
 
 		if F.Run and not acted then
 			cur = curCell(B)
-			-- Same choice as the Manual solver: tiles it proves safe first, then (only if "Guess when stuck" is on) the
-			-- lowest mine-risk tile, i.e. the blue guess, nearest first. The first tile that can be reached is used.
 			if cur and standable(cur) and guessTiles then
 				local list = guessTiles()
 				if list then
@@ -825,7 +791,7 @@ local function farmLoop()
 	F.Busy = false
 end
 
----------------------------------------------------------------- EVENT VOTES (auto "Yes")
+---------------------------------------------------------------- EVENT VOTES
 local okV, VIM = pcall(function()
 	return game:GetService("VirtualInputManager")
 end)
@@ -839,8 +805,6 @@ local lblEvent = nil
 local function trim(t)
 	return (tostring(t):gsub("^%s+", ""):gsub("%s+$", ""))
 end
-
--- cache of "Yes" buttons (TextButton, or a TextLabel inside a GuiButton), kept up to date by events
 local yesBtns = {}
 local YES_TEXT = { yes = true, join = true, accept = true }
 local function yesTarget(d)
@@ -875,8 +839,6 @@ end
 PlayerGui.DescendantAdded:Connect(function(d)
 	task.defer(onGuiAdded, d)
 end)
-
--- really visible on screen (every ancestor visible/enabled, non-zero size)
 local function shown(g)
 	local node = g
 	while node and node ~= game do
@@ -891,7 +853,6 @@ local function shown(g)
 	return g:IsDescendantOf(PlayerGui) and g.AbsoluteSize.X > 0 and g.AbsoluteSize.Y > 0
 end
 
--- visible text of the prompt that holds this Yes button: the highest ancestor that contains only this Yes button
 local function promptText(btn)
 	local top, node = btn.Parent, btn.Parent
 	while node and node:IsA("GuiObject") do
@@ -951,15 +912,11 @@ local function realClick(btn)
 		VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
 	end)
 end
-
--- "x/y votes required." -> x, y
 local function voteCount(txt)
 	local a, b = txt:match("(%d+)%s*/%s*(%d+)%s*votes")
 	return tonumber(a), tonumber(b)
 end
 
--- press Yes: signal and real click alternate every 0.05s until the prompt closes, the vote is full,
--- or "You can't back out now." shows up
 local function pressYes(btn, kind)
 	local hasSignal = (firesignal or getconnections) ~= nil
 	local startCur
@@ -979,10 +936,8 @@ local function pressYes(btn, kind)
 			return true
 		end
 		if i >= 3 and cur and startCur and cur > startCur then
-			return true -- the count went up after at least two attempts: the vote is in
+			return true
 		end
-		-- signal = the game's own button handler is called directly: nothing is touched on screen.
-		-- A real click (VirtualInputManager) only when "Screen click backup" is on, or when no signal API exists.
 		local viaSignal = hasSignal and (not F.ScreenClick or i % 2 == 1)
 		local p, s = btn.AbsolutePosition, btn.AbsoluteSize
 		push(("  %s attempt %d via %s | pos %.0f,%.0f size %.0f,%.0f | votes %s/%s"):format(
@@ -1000,16 +955,15 @@ end
 
 local function promptMatches(txt)
 	if txt == "" or txt:find("kick", 1, true) then
-		return false -- never vote on a votekick prompt
+		return false
 	end
 	local ek = F.EventKw:lower()
 	return ek ~= "" and txt:find(ek, 1, true) ~= nil
 end
 
-local seenAt = {} -- btn -> time the matching prompt was first seen
-local done = {} -- btn -> true once the vote went through (reset when the prompt hides or restarts at 0)
+local seenAt = {}
+local done = {}
 
--- Auto join event: presses "Yes" when the event round vote is on screen
 local function eventLoop(interval)
 	while F.AutoEvent do
 		for btn in pairs(yesBtns) do
@@ -1018,7 +972,7 @@ local function eventLoop(interval)
 			elseif shown(btn) then
 				local txt = promptText(btn)
 				if done[btn] and voteCount(txt) == 0 then
-					done[btn] = nil -- a new vote started on the same prompt
+					done[btn] = nil
 				end
 				if promptMatches(txt) and not txt:find("back out", 1, true) and not done[btn] then
 					if not seenAt[btn] then
@@ -1044,8 +998,6 @@ local function eventLoop(interval)
 	end
 end
 
--- Auto join secret event: spams the event vote's Yes button all the time, even while it is hidden,
--- so the vote is already pressed the moment it opens. Votekick buttons are never touched.
 local function isVoteYes(btn)
 	local ok, nm = pcall(path, btn)
 	nm = ok and nm:lower() or ""
@@ -1075,7 +1027,7 @@ local function secretLoop()
 					end
 				else
 					seenAt[btn], done[btn] = nil, nil
-					signalClick(btn) -- hidden: spam only the click signal (no real click on the screen)
+					signalClick(btn)
 				end
 			end
 		end
@@ -1083,9 +1035,7 @@ local function secretLoop()
 	end
 end
 
----------------------------------------------------------------- MANUAL (solver ESP + auto-flag)
--- Ported from the open-source bLockerman's Minesweeper solver (scriptblox) and adapted to this UI.
--- Exact deductions first, then exhaustive enumeration of every frontier group to get mine probabilities.
+---------------------------------------------------------------- MANUAL 
 local Teams = game:GetService("Teams")
 local startManual, stopManual, resetManualToken
 local lblMBoard, lblMNext, lblMFlag
